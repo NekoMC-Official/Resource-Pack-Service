@@ -18,13 +18,13 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:26.3.build.21-alpha")
-    compileOnly("com.google.code.gson:gson:2.11.0")
+    compileOnly("com.google.code.gson:gson:2.15.0")
 
     // Kotlin 运行时随插件分发：服务端只保证 Java 标准库
     implementation(kotlin("stdlib"))
 
     testImplementation("io.papermc.paper:paper-api:26.3.build.21-alpha")
-    testImplementation("com.google.code.gson:gson:2.11.0")
+    testImplementation("com.google.code.gson:gson:2.15.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
