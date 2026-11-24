@@ -363,6 +363,9 @@ packs/                             社区资源包
 采用 DCO 1.1，提交时加 `-s`：`git commit -s`。不需要签 CLA。细节见
 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+`main` 已开启分支保护：PR 合并前必须由仓库管理者（见
+[.github/CODEOWNERS](.github/CODEOWNERS)）审核通过，并通过 CI 与 CodeQL；禁止强制推送与删除分支。
+
 ## 许可
 
 [MIT](LICENSE)，Copyright (c) 2026 Sakana07X。

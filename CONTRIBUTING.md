@@ -96,7 +96,10 @@ By making a contribution to this project, I certify that:
 
 ## 评审与发行
 
-- 每个 PR 至少一名维护者审阅；涉及合并算法的改动需要附对拍结果（相同输入两次构建 sha1 一致）。
+- 合并前必须由仓库管理者审核。`.github/CODEOWNERS` 把全部文件指派给 `@Sakana07X` 与 `@LuoyeAutumn`，PR 至少需要其中一位的 approving review。
+- `main` 已开启分支保护：必须走 PR、必须通过 `CI` 与 `CodeQL`、禁止 force push 与删除；管理员也不能绕过。
+- 新的提交会驳回旧 approval，合并前需要重新请求审核。
+- 涉及合并算法的改动需要附对拍结果（相同输入两次构建 sha1 一致）。
 - 发行按语义化版本打 tag（`v0.2.0`），发行说明列出新增来源与合并行为变化。
 - 合并包内容一变，客户端就要重下整包，因此发行说明会标注"是否改变既有合成结果"。
 

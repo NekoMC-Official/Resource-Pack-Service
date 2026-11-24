@@ -15,6 +15,7 @@
 - [ ] 改到 `rust/rps-pack` 时 `cargo test` 通过
 - [ ] 新增行为带测试
 - [ ] 所有提交已用 `git commit -s` 签署 DCO
+- [ ] 已由仓库管理者（CODEOWNER）审核通过（合并前确认）
 
 ## 来源信息（接入资源包时填）
 
