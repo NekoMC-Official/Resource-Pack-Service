@@ -1,0 +1,94 @@
+name: Pack PR
+
+on:
+  pull_request_target:
+    paths:
+      - "packs/**"
+      - "tools/packs.py"
+      - ".github/workflows/pack-pr.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pack-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base
+        uses: actions/checkout@v7.0.1
+
+      - name: Checkout pull request head
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/rps-pack
+
+      - name: Build merger
+        run: cargo build --release --manifest-path rust/rps-pack/Cargo.toml
+
+      - name: Validate packs
+        id: build
+        continue-on-error: true
+        run: python tools/packs.py build --root pr/packs --out build/packs
+
+      - name: Merge packs
+        id: merge
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: >
+          python tools/packs.py merge
+          --packs build/packs
+          --binary rust/rps-pack/target/release/rps-pack
+          --out build/community-pack.zip
+          --report build/community-pack.report.json
+          --summary build/pack-summary.md
+
+      - name: Ensure summary
+        if: always()
+        run: |
+          if [ ! -f build/pack-summary.md ]; then
+            printf '%s\n' '<!-- rps-pack-report -->' '## 社区资源包构建报告' '' \
+              '资源包校验未通过，请看工作流日志里的错误信息。' > build/pack-summary.md
+          fi
+
+      - name: Comment on pull request
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: rps-pack-report
+          path: build/pack-summary.md
+
+      - name: Upload preview
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: community-pack-preview
+          path: |
+            build/community-pack.zip
+            build/community-pack.report.json
+            build/pack-summary.md
+          if-no-files-found: warn
+
+      - name: Fail when validation failed
+        if: steps.build.outcome == 'failure' || steps.merge.outcome == 'failure'
+        run: exit 1

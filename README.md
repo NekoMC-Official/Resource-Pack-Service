@@ -1,199 +1,371 @@
 # Resource Pack Service
 
-把多个插件的资源包合并成一份，交给服务器已有的下发宿主统一推送。
+[![CI](https://github.com/NekoMC-Official/Resource-Pack-Service/actions/workflows/ci.yml/badge.svg)](https://github.com/NekoMC-Official/Resource-Pack-Service/actions/workflows/ci.yml)
+[![Auto Release](https://github.com/NekoMC-Official/Resource-Pack-Service/actions/workflows/auto-release.yml/badge.svg)](https://github.com/NekoMC-Official/Resource-Pack-Service/actions/workflows/auto-release.yml)
+[![CodeQL](https://github.com/NekoMC-Official/Resource-Pack-Service/actions/workflows/codeql.yml/badge.svg)](https://github.com/NekoMC-Official/Resource-Pack-Service/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Folia](https://img.shields.io/badge/Folia-26.3-4caf50)](https://papermc.io/software/folia)
+[![Java](https://img.shields.io/badge/Java-25-orange)](https://adoptium.net/)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.4.21-7f52ff)](https://kotlinlang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2024-b7410e)](https://www.rust-lang.org/)
 
-Folia 26.3 / Java 25 / Paper API 26.3。本插件负责"包里有什么"与"怎么合"，把合成结果登记给下发宿主；变更后的重推由本插件触发，
-实际的 `setResourcePack` 与进服自动同步由下发宿主执行。对外标准是本服务自己的 `PackSource` / `ResourcePackService`，
-接入方不需要接触宿主 API。
+把多个插件提供的资源包合成**一份**，再由本插件自己通过内置 HTTP 出口和进服推送下发。
+不依赖其它下发插件，也不需要手动维护合并后的 zip。
+
+Minecraft 只接受一个服务端资源包。多个插件各发各的，客户端只会保留最后到达的那个，
+先到的材质会整包消失。本服务把「谁有什么」和「怎么发」拆开：插件只登记自己产出的
+zip，合并、版本、缓存、推送、回执全部由本服务统一处理。
+
+## 特性
+
+- **多来源合成一份包**：按优先级分层，同一路径高优先级覆盖，相同内容自动去重。
+- **可合并的 JSON**：`assets/<ns>/lang/*.json`、`sounds.json`、`font`、`atlases` 深度合并，
+  其余文件按策略取一份。
+- **确定性输出**：相同输入得到逐字节相同的 zip，便于比对 sha1 与缓存。
+- **来源变更自动重建**：轮询来源文件的 mtime，变化后异步重建，不阻塞服务器线程。
+- **自带下载出口**：JDK 内置 HTTP Server，单文件固定路径，支持 ETag / 304。
+- **自带推送**：玩家进服延迟推送，支持 `none` / `notify` / `force` 三种重推策略。
+- **回执处理**：加载成功、拒绝、下载失败都会记录；必装包被拒绝时会断开。
+- **对外标准 API**：其它插件实现 `PackSource` 并注册即可，不接触任何宿主类型。
+- **环境体检**：`/rps check` 检查下载地址、`server.properties` 残留配置、其它插件的疑似推送配置。
+- **社区资源包流水线**：PR 自动校验与预览，合并后自动发版，产物可直接作为来源使用。
 
 ## 技术栈
 
-| 层 | 选型 | 说明 |
-|---|---|---|
-| 服务端 | Folia 26.3 | 编译依赖 Paper API `26.3.build.21-alpha`；`folia-supported: true`，触碰玩家一律走实体调度器 |
-| 运行时 | Java 25 | 字节码目标 25；构建机用 JDK 26 toolchain |
-| 宿主层 | Java | Bukkit 生命周期、对外 `api` 接口、反射桥接；不含编排逻辑 |
-| 编排层 | Kotlin 2.4.21 | 配置解析、命令树、状态报告；与 Java 同为 JVM 25 目标 |
-| 计算层 | Rust（edition 2021） | `rps-pack`：zip 读写、JSON 深合并、sha1、`pack.mcmeta` 重建；依赖 `serde`、`serde_json`、`sha1`、`zip` |
-| 构建 | Gradle 9.5.1 + Shadow 9.6.1 | 自带 wrapper；产物是含 Kotlin 标准库与合并器的 fat jar |
-| 测试 | JUnit 5.11.4 + `cargo test` | Java 27 项、Rust 15 项 |
-| 配置 / 消息 | YAML + MiniMessage | Bukkit 配置 API；Adventure 渲染命令输出 |
+| 层 | 技术 | 说明 |
+| --- | --- | --- |
+| 平台 | Folia 26.3 / Paper API `26.3.build.21-alpha` | `folia-supported: true`，玩家操作走实体调度器 |
+| 宿主边界 | Java 25 字节码（JDK 26 toolchain，`--release 25`） | 插件入口、事件、HTTP、推送、对外 API |
+| 编排 | Kotlin 2.4.21（`jvmTarget = 25`） | 配置、注册表、发布器、监听、命令、文案 |
+| 计算 | Rust 2024（serde / serde_json / sha1 / zip） | `rps-pack` 只做合并，随 jar 内置 |
+| 构建 | Gradle 9.5.1 + Shadow 9.6.1 | 产出单个 `resource-pack-service.jar` |
+| 测试 | JUnit 5.11.4 / cargo test | Java 36 项，Rust 14 项集成测试 |
+| 文本 | Adventure + MiniMessage | 提示语与 `push.notify-message` |
 
-跨语言边界只传 JDK 类型与 Java record，Rust 侧通过 stdin/stdout 的 JSON 协议通信，不走 JNI。
+依赖方向是单向的：**Java → Kotlin → Rust**。跨语言边界只传 JDK 类型和 Java record，
+不把 Kotlin 默认参数、扩展函数或 `object` 单例暴露给 Java。
 
 ## 架构
 
 ```mermaid
 flowchart LR
     subgraph 来源
-        P1[插件 A<br/>PackSource]
-        P2[插件 B<br/>PackSource]
-        CFG[config.yml<br/>sources]
+        A[插件 A<br/>api.PackSource]
+        B[config.yml<br/>sources]
+        C[插件产出的 zip<br/>plugins/xxx/build.zip]
     end
+    R[来源注册表<br/>按 priority 排序]
+    P[PackPublisher<br/>异步单飞]
+    X[rps-pack<br/>合并 / 去重 / 冲突报告]
+    M[(merged.zip<br/>sha1 + 版本号)]
+    H[内置 HTTP 出口<br/>ETag / 304]
+    S[PackPusher<br/>进服 / 变更重推]
+    CL[客户端]
 
-    P1 -->|register| SVC[ResourcePackService]
-    P2 -->|register| SVC
-    SVC --> REG[(SourceRegistry)]
-    CFG --> REG
-    WATCH[SourceWatcher<br/>mtime 轮询] --> PUB
-
-    REG --> PUB[PackPublisher<br/>异步单飞]
-    PUB --> RUST[rps-pack<br/>合并/去重/冲突]
-    RUST --> OUT[merged.zip<br/>sha1 + 世代]
-    OUT --> BR[DispatchBridge<br/>注册 provider]
-    BR --> HOST[下发宿主]
-    HOST --> CLIENT[客户端]
+    A --> R
+    B --> R
+    C --> R
+    R --> P --> X --> M
+    M --> H --> CL
+    M --> S --> CL
 ```
 
-- **单飞**：同一时刻只允许一次构建，重复触发合并成一次；构建在异步线程，结果原子替换。
-- **失败保旧**：合并失败、来源缺失、二进制不可用都保留上一版 `merged.zip`，不会把玩家推回原版材质。
-- **换代**：内容不变不换代、不重推；内容一变按整包算 sha1，客户端重下整包（协议层没有增量）。
+一次构建只有一条路径：收集来源 → 校验 → 分层 → 合并 → 校验大小 → 落盘 → 递增版本 →
+更新下载地址 → 按 `push.mode` 处理在线玩家。构建失败保留上一版，不会把半成品发给玩家。
 
-目录：
+## 安装
+
+1. 把 `resource-pack-service.jar` 放进服务端 `plugins/`。
+2. 启动一次，生成 `plugins/Resource Pack Service/config.yml`。
+3. 按需改下载出口与来源，然后 **COLD 重启**（Bukkit 插件不支持热装）。
+4. 确认 `server.properties` 里这两项为空：
+
+   ```properties
+   resource-pack=
+   resource-pack-id=
+   ```
+
+   原版会在配置阶段抢先推旧包；`resource-pack-id` 还会派生第二个 UUID，导致客户端装两份。
+
+本插件没有任何 `depend` / `softdepend`，可以单独存在。只要同目录没有第二个会
+`setResourcePack` 的插件，它就是唯一出口。
+
+### 下载地址怎么定
+
+默认开启内置 HTTP：
+
+```yaml
+delivery:
+  http:
+    enabled: true
+    bind: 0.0.0.0
+    port: 25580
+    path: /pack/merged.zip
+    public-url: ""
+```
+
+- 单机或同网段：保持 `public-url` 为空，服务会按监听地址拼出 `http://<ip>:25580/pack/merged.zip`。
+- 公网 / NAT / 反向代理：填**完整可访问地址**，例如
+  `public-url: "https://mc.example.com/pack/merged.zip"`。填了就以它为准，不再看 bind。
+- 只用 CDN 或对象存储：把 `http.enabled` 设为 `false`，只填 `public-url`；推送仍然可用，
+  但文件需要你自己同步到那个地址。
+
+> 地址不是秘密：客户端必须能直接 GET。不要在 URL 里放长期凭据。
+
+## 快速开始
+
+```yaml
+sources:
+  - id: "bettermodel/base"
+    enabled: true
+    path: "plugins/BetterModel/build.zip"
+    priority: -100
+    namespaces: ["bettermodel"]
+
+  - id: "community/seasonal"
+    enabled: true
+    path: "plugins/Resource Pack Service/community-pack.zip"
+    priority: 10
+```
+
+`path` 相对服务端根目录。`priority` 越大越靠上层；同一路径冲突时上层覆盖下层。
+同优先级按登记顺序入层，后登记的在上；`policy: first` 时反过来保留先登记的。`namespaces` 只用于 `/rps list` 展示与冲突提示，不改变合并结果。
+
+改完执行：
 
 ```text
-src/main/java/moe/nekomc/resourcepack/   Java 宿主层（api、bridge、pack、merge、watch）
-src/main/kotlin/moe/nekomc/resourcepack/ 编排层（command、config）
-rust/rps-pack/                           合并器，可独立当 CLI 用
-docs/                                    设计与接入文档
+/rps reload
+/rps status
+/rps list
+/rps diff
 ```
 
-## 为什么需要它
+## 配置
 
-服务端一次只能给客户端下发一个资源包。当模型、家具、音效包各自想发包时，后注册的会把先注册的顶掉。
-本插件把这些来源按层序合成一个 zip，只登记一个 provider。
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `provider.required` | `false` | `true` 时客户端拒绝资源包会被断开 |
+| `provider.prompt` | 空 | 下载界面显示的一句提示 |
+| `merge.policy` | `override` | 路径冲突策略：`override` / `strict` / `first` |
+| `merge.rust.binary` | `bin/rps-pack` | 合并器路径；留空或不存在时用 jar 内置的那份 |
+| `merge.rust.timeout-ms` | `60000` | 单次合并超时，最小 5000 |
+| `merge.json-merge` | `true` | 是否深度合并 lang / sounds / font / atlases |
+| `merge.pack-format` | `auto` | `auto` 取所有子包都能接受的交集；也可写具体格式号 |
+| `merge.max-bytes` | `104857600` | 合成包大小上限，超过则本次构建失败并保留上一版 |
+| `merge.description` | `NekoMC 统一资源包` | 写进 `pack.mcmeta` 的 description |
+| `output.dir` | `merged` | 相对插件数据目录，存放 `merged.zip` 与条目清单 |
+| `delivery.join-delay-ticks` | `1` | 进服后延迟多少 tick 推送 |
+| `delivery.status-feedback` | `true` | 是否把加载/拒绝结果回显给玩家 |
+| `delivery.http.enabled` | `true` | 是否启动内置 HTTP 出口 |
+| `delivery.http.bind` | `0.0.0.0` | 监听地址 |
+| `delivery.http.port` | `25580` | 监听端口；`0` 表示随机端口（启动日志会打印实际值） |
+| `delivery.http.path` | `/pack/merged.zip` | 固定下载路径 |
+| `delivery.http.public-url` | 空 | 完整公网地址；填了优先使用 |
+| `watch.enabled` | `true` | 是否轮询来源文件 |
+| `watch.interval-seconds` | `60` | 轮询间隔，最小 5 |
+| `push.mode` | `notify` | 内容变化后：`none` 只落盘 / `notify` 提示玩家 / `force` 强制重推 |
+| `push.notify-message` | 见默认配置 | MiniMessage，默认带 `/rps push` 可点击提示 |
 
-## 构建
+`push.mode` 只影响**内容真的变化**的那一次构建。相同内容重复构建会跳过重推，
+避免玩家白白重下整包。
 
-需要两项工具：
+## 命令与权限
 
-- **JDK 26**：Gradle toolchain 会解析本机 Zulu 26；字节码仍按 25 输出。
-- **cargo**：在 `PATH` 或 `~/.cargo/bin` 均可。
+| 命令 | 作用 | 权限 |
+| --- | --- | --- |
+| `/rps` | 显示可用命令 | `rps.use` |
+| `/rps status` | 当前版本、sha1、下载地址、构建状态、下发方式 | `rps.status` |
+| `/rps list` | 已登记来源、优先级、命名空间 | `rps.list` |
+| `/rps build` | 立即触发一次合成 | `rps.build` |
+| `/rps reload` | 重载配置并重新合成 | `rps.reload` |
+| `/rps push` | 玩家给自己重载；控制台推全部在线玩家 | `rps.use`（玩家自助） |
+| `/rps push <玩家>` | 给指定玩家推送 | `rps.push` 或 `rps.admin` |
+| `/rps check` | 检查下载地址、`server.properties`、其它插件的疑似推送配置 | `rps.check` |
+| `/rps diff` | 对比本次与上次的条目差异 | `rps.diff` |
 
-```sh
+`rps.use` 默认对所有玩家开放，因为默认提示语里的「点这里重新下载」需要玩家能执行
+`/rps push`。其余节点默认 `op`，可用权限插件逐项分配；`rps.admin` 是
+`build` / `reload` / `push` / `check` 的集合。
+
+## 给插件作者：登记资源包来源
+
+依赖本插件的 API（编译期 `compileOnly`）。服务已提供下面这个接口，你只需要实现它：
+
+```java
+package moe.nekomc.resourcepack.api;
+
+public interface PackSource {
+    String id();                 // 全局唯一，建议 "插件名/用途"
+    java.nio.file.Path file();   // 每次构建时读取的 zip
+    int priority();              // 越大越靠上层
+    default boolean enabled() { return true; }
+    default String sha1() { return null; }          // null 表示由服务计算
+    default java.util.List<String> namespaces() { return java.util.List.of(); }
+}
+```
+
+注册与注销：
+
+```java
+import java.nio.file.Path;
+import java.util.List;
+import moe.nekomc.resourcepack.api.PackSource;
+import moe.nekomc.resourcepack.api.ResourcePackService;
+
+ResourcePackService service = getServer().getServicesManager()
+        .load(ResourcePackService.class);
+
+PackSource source = new PackSource() {
+    public String id() { return "myplugin/cosmetics"; }
+    public Path file() { return getDataFolder().toPath().resolve("pack.zip"); }
+    public int priority() { return 100; }
+    public List<String> namespaces() { return List.of("myplugin"); }
+};
+
+service.register(source);
+// onDisable: service.unregister("myplugin/cosmetics");
+```
+
+- `register` 会立即触发一次异步重建；来源文件还没生成时构建会失败并保留上一版，
+  等文件就绪后再调一次 `service.rebuild(false)` 即可。
+- `unregister(id)` 后同样会重建。插件 `onDisable` 里记得注销。
+- 版本号由服务统一递增，来源不要自己拼 `?v=`。
+- 只合并本地 zip；远程 URL 请先下载到本地再注册。
+- 你的 zip 可以不带 `pack.mcmeta`：没有就视为不限制 `pack_format`，条目照常合入。
+  带了则参与格式交集计算。命名空间放 `assets/<你的命名空间>/`，避免与他人撞车。
+- 不要自己调用 `Player#setResourcePack`，也不要另开推送通道；客户端只保留一个包。
+
+不写代码的接入方式、目录打包、远程 URL、冲突处理，见 [docs/integration.md](docs/integration.md)。
+
+## 合并规则
+
+1. 来源按 `priority` 升序排列，低优先级先入层，高优先级后入层。
+2. 同一路径：
+   - sha1 相同 → 去重，只留一份；
+   - 不同 → `override` 取最高层；`first` 取最低层；`strict` 直接失败并报冲突。
+3. 可合并 JSON（`lang`、`sounds.json`、`font`、`atlases`）按键深度合并，
+   数组按「高层在前」拼接并去重。
+4. `pack.mcmeta` 不复制任何一份，统一重建：`pack_format` 取所有子包都能接受的交集，
+   `description` 用 `merge.description`。
+5. 输出条目按路径升序、时间戳固定为 1980-01-01，保证相同输入逐字节相同。
+
+## 关于「增量更新」
+
+Minecraft 原版协议没有资源包增量下载：客户端只会对整包发一次 GET，没有 Range、
+没有 delta、没有断点续传。`setResourcePack` 的 sha1 参数只用于「本地已有同 hash 的包
+就跳过下载」。因此能做的只有三件事：
+
+1. **内容寻址**：sha1 不变就不重推，玩家不会重复下载。
+2. **把高频变更挪出包外**：配方、进度、函数放 datapack；需要频繁换外观的用
+   `custom_model_data` 预留材质槽，而不是每次重打整包。
+3. **压体积**：合并时去重、压缩纹理、删掉未引用的文件。
+
+`/rps diff` 给出条目级变化，用来判断这次改动是否值得让全服重下；`merge.max-bytes`
+防止误把大文件塞进来。真正的增量只能靠客户端 mod，服务端插件做不到。
+
+## 内置下发
+
+- `PackHttpServer` 只服务一个固定路径，支持 `ETag` 与 `304 Not Modified`；
+  其它路径 404，非 GET/HEAD 405。固定 8 个守护线程处理并发下载。
+- `PackPusher` 监听 `PlayerJoinEvent`，按 `delivery.join-delay-ticks` 在该玩家的
+  Folia 实体调度器上调用 `setResourcePack`；sha1 为空时走 3 参重载，避免空哈希。
+- 监听 `PlayerResourcePackStatusEvent`：成功、拒绝、下载失败、无效地址分别记录；
+  `provider.required: true` 时拒绝会在玩家调度器上断开，避免在主线程碰实体。
+- 内容变化后按 `push.mode` 处理在线玩家：
+  - `none`：只更新文件与状态；
+  - `notify`：发一条可点击的提示，玩家自己执行 `/rps push`；
+  - `force`：直接对所有在线玩家强制重推。
+
+本插件不监听其它插件的推送，也不与它们协商。若同目录还有插件直接
+`Player#setResourcePack`，后发者会覆盖前一个包——这是客户端行为，服务端无法仲裁。
+`/rps check` 会扫描 `plugins/*/config.yml` 里疑似 `resource-pack` / `pack-url` /
+`send-on-join` 的配置并给出警告。
+
+## 社区资源包与自动发版
+
+`packs/` 是社区资源包目录，每个子目录一个包：
+
+```text
+packs/
+  seasonal/
+    pack.yml          # id / name / priority / license / pack_format
+    pack.mcmeta
+    assets/<namespace>/...
+```
+
+- 提 PR 修改 `packs/`：`pack-pr` 工作流用基础分支的脚本校验结构、路径穿越、大小与
+  条目数，合并成预览包并以置顶评论给出 sha1、条目数与冲突列表；PR 代码不会被运行。
+- 合并进 `main`：`auto-release` 自动构建插件 jar 与 `community-pack.zip`，
+  补丁版本号 +1，创建 Release 并附上报告。
+- 服务器使用：下载 `community-pack.zip` 放到插件数据目录，在 `sources` 里登记：
+
+  ```yaml
+  - id: "community/seasonal"
+    path: "plugins/Resource Pack Service/community-pack.zip"
+    priority: 10
+  ```
+
+详见 [packs/README.md](packs/README.md) 与 [docs/ci.md](docs/ci.md)。
+
+## 从源码构建
+
+需要 JDK 26、Gradle wrapper 和 Rust（`cargo` 在 PATH，或位于 `~/.cargo/bin`）：
+
+```bash
 ./gradlew build
 ```
 
 产物：
 
-| 产物 | 用途 |
-|---|---|
-| `build/libs/resource-pack-service.jar` | 装进 `server/plugins/`，已包含 Kotlin 标准库与当前平台的 `rps-pack` |
-| `build/dist/bin/rps-pack(.exe)` | 合并器原始二进制，可单独调用或放到 `merge.rust.binary` |
+- `build/libs/resource-pack-service.jar`：可直接部署，内含当前平台的 `rps-pack`；
+- `build/libs/resource-pack-service-<version>-plain.jar`：不含依赖，仅供排查。
 
-没有 cargo 时构建仍能完成，但 **jar 里不会有合并器**：插件启动后构建资源包会直接报错，不会静默降级。
-要发布可用的 jar，就在有 cargo 的机器上打包；目标平台与构建机不一致时，需在目标平台（或 CI）上重新 `cargo build --release`。
+`rps-pack` 按构建机平台选一份塞进 jar（Windows / Linux / macOS × x86_64 / aarch64）。
+**在 Windows 上打的包内置的是 Windows 合并器，不能直接部署到 Linux 服务端**；
+跨平台发布请用 `release.yml` 的矩阵构建，或在目标平台本地构建。
 
-## 安装
+没有 `cargo` 时 Java 部分仍能编译，但 jar 内没有合并器，运行时会报
+「合并器不可用」并保留上一版；发布用的 jar 必须在有 Rust 的机器上打。
 
-1. 把 jar 放进 `server/plugins/`，与下发宿主插件同目录（通过它的服务接口接入）。
-2. 启动一次，生成 `plugins/Resource Pack Service/config.yml`。
-3. 填 `output.public-url`（必须是客户端能访问到的完整地址）。
-4. `server.properties` 的 `resource-pack` 与 `resource-pack-id` 保持留空。
-5. 重启生效（COLD 插件）。
+## 目录结构
 
-## 命令与权限
-
-命令节点全部交给权限插件（LuckPerms 等）管理，默认只给 OP。`/rps` 入口要求 `rps.use`，
-子命令各一条节点；`rps.admin` 是管理组（等价于 build/reload/push/check），`rps.*` 为通配。
-
-| 命令 | 权限节点 | 默认 | 说明 |
-|---|---|---|---|
-| `/rps`、`/rps help` | `rps.use` | op | 命令入口，帮助按实际权限裁剪 |
-| `/rps status` | `rps.status` | op | 下发状态、世代号、下发权归属 |
-| `/rps list` | `rps.list` | op | 来源清单与层序 |
-| `/rps diff` | `rps.diff` | op | 最近两版合成包的条目差异 |
-| `/rps build` | `rps.build` 或 `rps.admin` | op | 立即重建 |
-| `/rps reload` | `rps.reload` 或 `rps.admin` | op | 重读 config.yml 并立即重建 |
-| `/rps push <玩家>` | `rps.push` 或 `rps.admin` | op | 对单个在线玩家重推 |
-| `/rps check` | `rps.check` 或 `rps.admin` | op | 体检：路径、格式区间、server.properties、下发权归属、疑似自带下发的插件配置 |
-
-没有权限的子命令不会出现在 Tab 补全与帮助里，执行时提示会写明缺哪个节点。
-
-## 给插件作者：让自己的资源包接进来
-
-先分清两种情况。绝大多数插件走 A，**不用改本插件，也不用等发行**。
-
-### A. 实现本服务的 `PackSource`（推荐，不用改本插件）
-
-服务启用后会把 `ResourcePackService` 注册到 Bukkit Services。你的插件实现一个来源并登记即可：
-
-```java
-ResourcePackService service = Bukkit.getServicesManager().load(ResourcePackService.class);
-if (service != null) {
-    service.register(new PackSource() {
-        public String id() { return "yourplugin"; }        // 全局唯一，建议插件名小写
-        public Path file() { return getDataFolder().toPath().resolve("build.zip"); }
-        public int priority() { return 10; }               // 越大越靠上层
-        public String sha1() { return null; }              // 可给声明值，null 表示不校验
-        public List<String> namespaces() { return List.of("yourplugin"); }
-    });
-}
+```text
+src/main/java/moe/nekomc/resourcepack/
+  ResourcePackServicePlugin.java   插件入口、服务注册、生命周期
+  api/                             对外标准 API（纯 JDK 类型）
+  delivery/                        HTTP 出口、进服推送、回执、sha1 工具
+  merge/                           rps-pack 进程调用、内置二进制解出
+  pack/                            Host / HostStatus / PackSnapshot / EntryManifest
+src/main/kotlin/moe/nekomc/resourcepack/
+  config/ core/ merge/ pack/ watch/ command/
+rust/rps-pack/                     Rust 合并器与集成测试
+tools/packs.py                     社区资源包校验、打包、合并
+packs/                             社区资源包
 ```
-
-- 接口只有 [api/PackSource.java](src/main/java/moe/nekomc/resourcepack/api/PackSource.java)
-  与 [api/ResourcePackService.java](src/main/java/moe/nekomc/resourcepack/api/ResourcePackService.java)
-  两个文件，全是 JDK 类型，不含任何宿主插件类型。
-- 登记会触发一次异步重建；`service.push(uuid, force)` 对在线玩家立即重推。
-- 内容变了用同一个 `id` 再 `register` 一次即可覆盖；版本号由本服务按合成结果统一递增。
-- zip 自带 `assets/<你的命名空间>/`，不要往别人的命名空间塞文件；`pack.mcmeta` 可有可无，
-  有则参与 `pack_format` 交集计算，没有视为"不限制格式"。
-- 合成包的登记与推送由本服务统一处理，接入方不需要知道谁在推，也不需要自己调 `setResourcePack`。
-- 建议在 `onDisable` 里 `service.unregister(id)`：来源指向的文件被删掉会让下次构建失败并保留旧版合成包。
-
-### B. 想让来源开箱即用（提 PR）
-
-例如运行时在 `plugins/YourPlugin/build.zip` 生成资源包，又不想让运维手写配置。想让它成为本项目默认支持的一项：
-
-1. Fork `NekoMC-Official/Resource-Pack-Service`，从 `main` 开分支 `feat/source-<插件名>`。
-2. 在 `src/main/resources/config.yml` 的 `sources:` 下加默认条目（`id`、`path`、`priority`）。
-3. 产出时机特殊（重载重写、异步生成）就在 `watch/` 补钩子，或说明为什么轮询够用。
-4. 加测试：`src/test/java/.../merge/` 用最小 zip 验证你的条目能合入且不覆盖坏他人内容。
-5. `./gradlew build` 与 `cargo test`（`rust/rps-pack`）必须全绿，更新 `docs/design.md` 来源表。
-6. PR 描述写清：插件名与版本、产出路径、是否自带 `pack.mcmeta`、`pack_format` 范围、
-   重写时机、命名空间、期望优先级、是否需要 `required`。
-
-评审通过后合入 `main`，随**下一个发行版本**发布（默认 MINOR 递增）。等不及发行也没关系：
-运维方在你插件的配置里本地加一条 `sources` 就立即生效。
-
-提 PR 即表示你同意 [DCO 1.1](CONTRIBUTING.md#贡献者协议dco)（提交加 `-s` 即可），
-代码按 [MIT](LICENSE) 发布。完整流程与测试要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-### 合并规则（写包前先看）
-
-- 上层覆盖下层同名条目；`lang/*.json`、`sounds.json`、`font/`、`atlases/` 按 key 深合并。
-- 每层 `pack.mcmeta` 丢弃后重建：`pack_format` 取所有来源都能接受的交集，描述取配置值。
-- `sha1` 按整个合成包计算；任一来源变更 → 整包换代 → 客户端重下整包（协议层没有增量）。
-- 冲突不静默：`/rps build` 的控制台输出与 `MergeResult.conflicts` 会列出被覆盖的路径。
-
-## 部署
-
-1. `./gradlew build` → `build/libs/resource-pack-service.jar`（内含构建机平台的 rps-pack）。
-2. 只把 jar 放进 `server/plugins/`；首次启动自动解出合并器到 `plugins/Resource Pack Service/bin/`。
-   换平台（如 Linux x86_64 / aarch64）需在该平台构建，或用 `merge.rust.binary` 指向外部可执行文件。
-3. `server.properties` 的 `resource-pack` 与 `resource-pack-id` 必须留空，由下发宿主独占。
-4. 需要重启才生效（COLD）；`/rps reload` 只重读配置不换 jar。
-
-## 当前进度
-
-- 已完成：对外标准 API（`api/PackSource`、`api/ResourcePackService`）、配置与来源注册表、下发宿主桥接、
-  Rust 合并器 `rps-pack`（随 jar 内置并自动解出）、合成落盘与世代换代、来源文件侦测、条目级 `/rps diff`、
-  `/rps status|list|build|reload|push|check|diff`、按子命令的权限节点、下发权与自带下发插件的体检。
-- 测试：Java 27 项、Rust 15 项，`./gradlew build` 全绿。
-- 未开始：随包 HTTP 服务器（`output.http`）——当前依赖 `output.public-url` 指向外部静态托管。
 
 ## 文档
 
-- [设计说明](docs/design.md)
-- [接入方式详解](docs/integration.md)（含四种接入方式与时序图）
-- [贡献指南](CONTRIBUTING.md)
+- [docs/design.md](docs/design.md)：架构、契约、合并语义、里程碑与风险
+- [docs/integration.md](docs/integration.md)：四种接入方式与冲突处理
+- [docs/ci.md](docs/ci.md)：CI、发布、部署与社区资源包流水线
+- [packs/README.md](packs/README.md)：社区资源包规范
+- [CONTRIBUTING.md](CONTRIBUTING.md)：DCO、分支、测试与评审
+
+## 当前状态
+
+- 合成、内置 HTTP、进服推送、回执、权限、体检、社区资源包流水线均已落地。
+- Java 36 项测试、Rust 14 项集成测试；`./gradlew build` 与 `cargo test` 通过。
+- 尚未做真实 Folia 服务端的端到端联调；首次部署建议在 preflight 副本上验证
+  `/rps status`、进服推送与拒绝回执。
 
 ## 贡献
 
-欢迎提 Issue 与 PR。本项目采用 **DCO 1.1** 贡献者协议（不签 CLA）：提交时加 `-s`
-（`git commit -s`）即表示你确认有权提交并同意按 MIT 协议发布。细则、分支命名、
-测试要求与"接入新资源包来源"的完整流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+采用 DCO 1.1，提交时加 `-s`：`git commit -s`。不需要签 CLA。细节见
+[CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可
 
-本项目以 [MIT 协议](LICENSE) 发布，Copyright (c) 2026 Sakana07X。
+[MIT](LICENSE)，Copyright (c) 2026 Sakana07X。
+
+第三方材质、模型、音效的版权仍归各自作者；把资源包放进本仓库或对外分发前，
+请确认你拥有相应许可。

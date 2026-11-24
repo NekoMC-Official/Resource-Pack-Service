@@ -1,0 +1,44 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布标签，例如 v0.1.0'
+        required: true
+      platform:
+        description: '目标平台'
+        type: choice
+        options: [linux-x86_64, windows-x86_64]
+        default: linux-x86_64
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "*-${{ inputs.platform }}.jar" \
+            --dir dist
+      - uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Copy jar (no restart)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          DIR: ${{ secrets.DEPLOY_PLUGINS_DIR }}
+        run: |
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          scp dist/*.jar "$USER@$HOST:$DIR/resource-pack-service.jar.new"
+          ssh "$USER@$HOST" "cd '$DIR' && if [ -f resource-pack-service.jar ]; then cp resource-pack-service.jar resource-pack-service.jar.bak-\$(date +%Y%m%d%H%M%S); fi && mv resource-pack-service.jar.new resource-pack-service.jar && sha256sum resource-pack-service.jar"
+      - name: Reminder
+        run: echo '已投递但未重启：按部署流程在维护窗口 COLD 重启，先跑 /rps check。'

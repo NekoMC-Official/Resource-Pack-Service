@@ -1,204 +1,278 @@
 # 设计说明
 
-## 1. 目标与边界
+本文记录 Resource Pack Service 的边界、对外契约、合并语义、下发链路与已知取舍。
+面向要接来源的插件作者、要排障的运维，以及后续维护者。
 
-服务端一次只能下发一个资源包，客户端拿到的是完整 zip。本插件解决两件事：
+## 1. 目标与非目标
 
-1. **多来源合成**：把若干插件的资源包按层序合并成一个，冲突可解释。
-2. **单点注册**：只向下发宿主登记一个合成包来源，其余插件不再各自抢下发权。
+**目标**
 
-对外只暴露本服务自己的标准：`moe.nekomc.resourcepack.api.PackSource` 与
-`moe.nekomc.resourcepack.api.ResourcePackService`，全部是 JDK 类型，不含任何宿主插件类型。
+- 多个插件各自产出资源包时，服务端只下发**一份**合成包。
+- 来源可以来自配置、插件 API、或任意已落盘的 zip；不要求对方改推送逻辑。
+- 合成结果确定性可复现，内容不变就不让玩家重下。
+- 服务自己完成 HTTP 下载出口与进服推送，不依赖其它插件。
+- 失败时保留上一版，绝不把半成品或空包发给客户端。
 
-不做的事：自己调用 `Player#setResourcePack`、另开推送通道、修改下发宿主的配置。
+**非目标**
 
-## 2. 对外标准 API
+- 不做客户端 mod，不做协议层增量下载（原版协议不支持）。
+- 不做按玩家分组的多套资源包；Minecraft 一个连接只有一个服务端包。
+- 不接管其它插件的私有推送；只通过 `/rps check` 报告疑似冲突。
+- 不提供公网鉴权、限速、CDN 同步；这些交给反向代理或对象存储。
 
-| 类型 | 作用 |
-|---|---|
-| `api.PackSource` | 来源标准：`id()`、`file()`、`priority()`，可选 `enabled()`、`sha1()`、`namespaces()` |
-| `api.ResourcePackService` | 统一入口：`register/unregister/sourceIds/version/url/sha1/rebuild/push` |
+## 2. 分层与依赖方向
 
-插件通过 `Bukkit.getServicesManager().load(ResourcePackService.class)` 取得入口。
-登记来源会触发异步重建；`push(uuid, force)` 立即重推。版本号由本服务按合成结果统一递增，
-接入方不需要维护。同 id 与配置文件来源冲突时，注册的优先；`/rps reload` 后会重新投回。
+```text
+Java（宿主边界）
+  ResourcePackServicePlugin   插件入口、ServicesManager 注册、生命周期
+  api/PackSource              对外来源标准（纯 JDK）
+  api/ResourcePackService     对外服务入口（纯 JDK）
+  delivery/PackHttpServer     下载出口
+  delivery/PackPusher         进服推送、回执、Folia 调度
+  merge/RustPackMerger        启动 rps-pack、解析 JSON 结果
+  merge/BundledRust           从 jar 解出当前平台二进制
+  pack/PackSnapshot           跨层不可变快照（Java record）
+        ↓
+Kotlin（编排）
+  config/RpsConfig            读取与校验 config.yml
+  core/SourceRegistry         来源表与层序
+  core/StateStore             sha1 → 世代号
+  pack/PackPublisher          异步单飞、落盘、换代、通知
+  pack/RegisteredSources      ResourcePackService 的实现
+  pack/EntryManifest          entries.txt / entries.prev.txt 与 diff
+  pack/PackConflictScanner    扫描其它插件的疑似推送配置
+  watch/SourceWatcher         mtime 轮询
+  command/RpsCommand          命令与权限
+        ↓
+Rust（计算）
+  rps-pack                    读取请求、合并 zip、输出确定性包与报告
+```
 
-### 2.1 下发宿主的内部契约
+规则：
 
-实际推送由宿主插件承担，属于实现细节，接入方不必关心。宿主通过 Bukkit Services 暴露
-`CompanionPackApi`，`register(PackProvider)` 即接管下发。要点（以宿主侧实现为准）：
+1. 依赖只能向下：Java 可以调 Kotlin，Kotlin 可以调 Java 的 DTO 和 Rust 进程；反向不成立。
+2. 跨语言只传 JDK 类型和 Java record（`PackSnapshot`、`ZipSource`、`HostStatus` 等），
+   不把 Kotlin 默认参数、扩展函数、`object` 单例当 API。
+3. Kotlin 的 `jvmTarget` 与 Java 的 `--release` 都是 25，避免 JVM-target 不一致。
+4. Rust 只做纯函数式计算：输入请求与文件，输出 zip 与 JSON 报告，不碰 Bukkit。
+
+## 3. 对外标准 API
+
+包名 `moe.nekomc.resourcepack.api`，只有 JDK 类型：
+
+```java
+public interface PackSource {
+    String id();
+    Path file();
+    int priority();
+    default boolean enabled() { return true; }
+    default String sha1() { return null; }
+    default List<String> namespaces() { return List.of(); }
+}
+
+public interface ResourcePackService {
+    boolean register(PackSource source);
+    boolean unregister(String id);
+    Set<String> sourceIds();
+    int version();
+    String url();
+    String sha1();
+    void rebuild(boolean announce);
+    int push(UUID player, boolean force);
+}
+```
+
+取得方式：
+
+```java
+ResourcePackService service = Bukkit.getServicesManager().load(ResourcePackService.class);
+```
+
+行为约定：
 
 | 项 | 约定 |
-|---|---|
-| `id()` | 唯一槽位标识，本插件固定 `resourcepack-service/active` |
-| `version()` | 要求版本，正整数且单调递增；URL 的 `?v=` 必须等于它 |
-| `url()` | http(s) 完整地址 |
-| `sha1()` | 合成包的 sha1 十六进制；空表示不校验 |
-| `priority()` | 大者优先；同优先级先注册者胜（合成包对其它来源仍按层序合入） |
-| `required()` | true 等价强制推送，客户端拒绝即断开 |
-| `prompt()` | 非空作为下载提示语 |
+| --- | --- |
+| `register` | `id` 为空或 `file` 为 null 返回 false；同 id 覆盖；成功即触发异步重建 |
+| `unregister` | 不存在返回 false；成功即触发异步重建 |
+| `sourceIds` | 只含 API 登记的来源，不含 `config.yml` 的 `sources` |
+| `version` | 当前成功构建的世代号；从未成功为 0 |
+| `url` / `sha1` | 当前快照；未构建或没有下载地址时为空串 |
+| `push` | 只对在线玩家生效，返回排程数量；不等待客户端回执 |
+| 配置来源与 API 来源同 id | API 来源覆盖配置来源 |
 
-注册不会自动重推在线玩家；需要立即生效时调用 `api.push(uuid, false)`。玩家进服 1 tick 内由
-宿主自动同步。
+API 来源在 `/rps reload` 后由 `RegisteredSources.reapply` 重新投回新注册表，
+不需要插件重新注册。
 
-## 3. 语言分层
+## 4. 来源与层序
 
-| 层 | 语言 | 包 | 规则 |
-|---|---|---|---|
-| 宿主 | Java | `moe.nekomc.resourcepack`、`bridge`、`api` | Bukkit 生命周期、反射桥接、record 边界类型 |
-| 编排 | Kotlin | `command`、`config`、`watch` | 配置解析、命令树、报告渲染 |
-| 计算 | Rust | `rust/rps-pack` | zip 读写、JSON 合并、sha1、pack.mcmeta 重建 |
+来源有三种进入方式：
 
-跨语言边界**只传 JDK 类型与 Java record**。Kotlin 的 data class 不出 Kotlin 包；不用默认参数、
-扩展函数、`object` 单例做跨边界 API。`jvmTarget` 与 `options.release` 必须同档（当前 25）。
+1. `config.yml` 的 `sources`（运维零代码）；
+2. 插件实现 `PackSource` 并 `register`；
+3. 插件把 zip 落在某路径，由运维写进 `sources`。
 
-Rust 通过 **sidecar 进程**接入，不走 JNI/Panama：
+`SourceRegistry` 以 `priority` 升序排列：低优先级先入层，高优先级后入层。
+同一路径冲突时高层覆盖低层。相同 `priority` 按登记顺序，先登记的先入层
+（也就是在 `override` 下先登记的反而会被后登记的覆盖，这一点在文档里明确写死，
+避免“同优先级谁赢”靠猜）。
 
-- 不改 `server/start.sh` 加 `--enable-native-access`；
-- panic 只让本次构建失败，保留上一版合成包；
-- 一个可执行文件同时可被 CI 调用。
+## 5. 合并语义
 
-## 4. 合并语义
+### 5.1 条目选择
 
-### 4.1 层序
+| 情况 | 处理 |
+| --- | --- |
+| 路径只出现一次 | 直接保留 |
+| 路径多次出现且 sha1 相同 | 去重，保留一份 |
+| 路径多次出现且 sha1 不同，`policy=override` | 取最高层 |
+| 同上，`policy=first` | 取最低层 |
+| 同上，`policy=strict` | 整次构建失败，报告冲突路径与来源 |
+| 目录条目 | 忽略，只处理文件 |
 
-`priority` 小的先叠，大的后叠，后叠覆盖先叠。同 `priority` 保持 `config.yml` 中的书写顺序。
+### 5.2 可合并 JSON
 
-### 4.2 冲突分类
+以下路径不是“整文件覆盖”，而是按键深合并：
 
-| 类型 | 判定 | 处置 |
-|---|---|---|
-| 内容重复 | 同名条目 CRC 与大小一致 | 去重，计一次 |
-| 路径冲突 | 同名但内容不同 | 高优先级胜，记入冲突报告 |
-| 元数据 | `pack.mcmeta` | 丢弃各来源的，按交集重建一份 |
-| 可合并 JSON | `lang/*.json`、`sounds.json`、`font/*.json`、`atlases/*.json` | 结构合并 |
-| 命名空间共用 | 两个来源写同一 `assets/<ns>/` | 仅报告，不阻断 |
-| 格式区间 | 各来源 `supported_formats` 无交集 | 构建失败，保留上一版 |
-| 图标 | `pack.png` | 取最高层 |
+- `assets/<ns>/lang/*.json`
+- `assets/<ns>/sounds.json`
+- `assets/<ns>/font/*.json`
+- `assets/<ns>/atlases/*.json`
 
-策略 `override`（默认）/ `strict`（有冲突即失败）/ `first`（低层胜，排查用）。
+对象递归合并；标量由高层覆盖；数组按“高层在前”拼接后去重。
+解析失败时该文件退化为普通条目，按冲突策略取一份，并在报告里给出警告。
 
-### 4.3 JSON 合并
+### 5.3 pack.mcmeta
 
-- `lang/*.json`、`sounds.json`：深层合并，高层覆盖同键。
-- `font/*.json`、`atlases/*.json`：数组按层序从高到低拼接，按 `toString()` 去重。
-- 其余 JSON 一律按路径覆盖，不做猜测性合并。
+所有来源的 `pack.mcmeta` 都丢弃，由 rps-pack 重建：
 
-### 4.4 确定性
+- `pack_format`：取所有来源声明范围的交集；交集为空则构建失败；
+- `supported_formats`：保留为交集区间；
+- `description`：取 `merge.description`。
 
-输出条目按名称排序，时间戳固定为 1980-01-01，`pack.mcmeta` 由 `pack_format` 与
-`supported_formats` 交集重建。同一输入必得同一 sha1，因此"内容没变就不重建、不推送、不重下"。
+来源可以不带 `pack.mcmeta`，视为不限制格式；只有所有来源都不带且请求里
+`format=0` 时才失败，并要求显式指定 `merge.pack-format`。
 
-## 5. 增量更新的现实
+### 5.4 确定性与安全
 
-客户端下载资源包是完整 GET，没有 Range、没有 delta、没有断点续传。服务端能做的只有两件：
+- 条目按路径升序写入；
+- 所有条目时间戳固定为 1980-01-01 00:00:00；
+- 相同输入得到逐字节相同的 zip，sha1 稳定；
+- 拒绝 `..`、绝对路径、盘符、NUL 等等 zip slip 路径；
+- 单条目解压上限 64 MB，条目数上限 20000；
+- 合成包总大小受 `merge.max-bytes` 限制，超过则构建失败并保留上一版。
 
-1. **同 sha1 不重下**：客户端按 hash 复用本地已下载的包。
-2. **减少变更频率与体积**：把高频变更挪出包外。
+## 6. 构建与换代
 
-据此实现三项可观测能力：
+`PackPublisher` 在异步调度器上运行，同一时刻只允许一次构建（`AtomicBoolean`）：
 
-- `/rps diff`：对比上一版条目索引，列出本次变更的文件与所属来源。
-- `merge.warn-delta-bytes`：单次压缩前新增/变更字节超阈值时告警。
-- 分层建议：扫描 `data/` 下的配方、进度、函数，提示可移到 datapack（客户端零下载）。
-
-"只传差异"在协议层不成立；真增量需要客户端 mod，超出本插件范围。
-
-## 6. rps-pack 协议
-
-```
-rps-pack merge --request - --output <path>
-```
-
-stdin：
-
-```json
-{"format":0,"description":"NekoMC 统一资源包","policy":"override","json_merge":true,
- "sources":[{"id":"bettermodel/base","path":"plugins/BetterModel/build.zip","priority":-100}]}
-```
-
-stdout（exit 0）：
-
-```json
-{"ok":true,"sha1":"...","bytes":12345,"entries":678,"deduped":2,
- "format":46,"format_min":46,"format_max":60,
- "conflicts":[{"path":"assets/x/y.png","winner":"a","losers":["b"]}],
- "warnings":[],"millis":88}
+```text
+registry.ordered()
+  → 检查来源文件存在
+  → rps-pack merge --request - --output merged.staging.zip
+  → 校验大小、算 sha1
+  → StateStore.commit(sha1) 决定世代号是否递增
+  → Files.move(staging, merged.zip, REPLACE_EXISTING)
+  → EntryManifest.rotateAndWrite()
+  → 生成 url（base + ?v=世代号）
+  → PackSnapshot 原子替换
+  → 若内容变化，按 push.mode 通知
 ```
 
-失败 exit 2，stdout 为 `{"ok":false,"error":"..."}`，诊断走 stderr。
+失败分支：
 
-Java 侧 `FallbackMerger` 在非零退出、超时（默认 60s）、JSON 非法时回落 `JavaPackMerger`，
-连续 3 次失败锁定 Java 到下次 reload。
+- `MergeUnavailableException`：合并器缺失或无法执行，`SEVERE` 记录并保留上一版；
+- 其它异常：`WARNING` 记录并保留上一版；
+- 快照保留上一版的 url/sha1/version，额外带上 `error` 文本，`/rps status` 可见。
 
-## 7. 构建产物
+内容未变化时 `StateStore.commit` 返回 false，跳过重推，避免全服重下。
 
-| 产物 | 位置 | 投放 |
-|---|---|---|
-| 插件 jar | `build/libs/resource-pack-service.jar` | `server/plugins/` |
-| 合并器 | `build/dist/bin/rps-pack.exe`（Linux 无后缀） | `plugins/Resource Pack Service/bin/` |
+## 7. 下发链路
 
-二进制不打进 jar：jar 内可执行需运行时解压与 chmod，且临时目录里的 exe 容易被杀软误报。
+### 7.1 下载出口
 
-## 8. 里程碑
+`PackHttpServer` 用 JDK `com.sun.net.httpserver.HttpServer`：
 
-| 阶段 | 内容 | 验收 |
-|---|---|---|
-| M0 | 安装 rustup（`x86_64-pc-windows-msvc`），空 crate 编译通过 | `cargo build` 成功 |
-| M1 | 构建骨架：Kotlin + shadow + stdlib，`jvmTarget`/`release` 对齐 25（JDK 26 编译） | `./gradlew build` 绿 |
-| M2 | 配置解析与命令迁 Kotlin，record 边界不动 | 命令可跑 |
-| M3 | 抽出 `PackMerger` 接口，`JavaPackMerger` 归位 | 单测绿，行为不变 |
-| M4 | `rps-pack` 实现合并 + `cargo test` | CLI 手跑真包 |
-| M5 | ~~`RustPackMerger` + `FallbackMerger` + `engine` 配置~~ → 改为二进制内置、单一引擎 | 删掉 jar 内资源后启动报可读错误，不回退 |
-| M6 | 双实现对拍、`/rps diff`、文档与部署说明 | 输出一致 |
+- 只服务配置的固定路径，其它路径 404；
+- 只接受 GET/HEAD，其它方法 405；
+- 用文件 sha1 生成强 ETag，支持 `If-None-Match` 返回 304；
+- 8 个守护线程处理并发下载；
+- `port=0` 时由系统分配，启动日志与实际 URL 使用真实端口；
+- 文件还不存在时返回 404，等构建完成后再可下载。
 
-## 9. 验收
+`delivery.http.public-url` 非空时，推送地址完全以它为准；此时可以关闭内置 HTTP，
+把文件同步到 CDN 或对象存储。
 
-1. `./gradlew build` 与 `cargo test` 全绿。
-2. 固定 fixture 下 Java 与 Rust 实现：条目名集合一致、`pack.mcmeta` 结构一致、冲突列表一致；
-   各自 sha1 内部稳定（不要求跨实现相同）。
-3. 删除 `bin/rps-pack` 后 `engine: auto` 静态回落，构建仍成功。
-4. 源文件未变化时重复构建不递增世代号，不触发推送。
-5. `server.properties` 的 `resource-pack` 未留空时，`/rps check` 报错。
+### 7.2 推送
 
-## 10. 风险
+`PackPusher`：
 
-| 风险 | 影响 | 处置 |
-|---|---|---|
-| 切换引擎导致 sha1 变化 | 全体客户端重下一次 | 一次性；世代号继续单调递增 |
-| 双实现语义漂移 | 结果不一致 | fixture 对拍 |
-| jar 增至约 1.8 MB | reload 类加载略慢 | 已接受，stdlib 为唯一新增依赖 |
-| Rust 工具链缺失 | 只能走 Java 实现 | 构建自动跳过，功能不缺 |
-| 合成包过大 | 客户端下载慢、进服卡 | 体积告警 + 分层建议 |
+- 监听 `PlayerJoinEvent`，延迟 `delivery.join-delay-ticks` 后在玩家的
+  Folia 实体调度器上调用 `setResourcePack`；
+- sha1 为空时使用 3 参重载，非空时使用带 sha1 的 4 参版本；
+- 监听 `PlayerResourcePackStatusEvent`，记录加载成功、拒绝、下载失败、无效地址；
+- `provider.required=true` 且客户端拒绝时，在玩家调度器上断开；
+- 内容变化后：`none` 不动作，`notify` 发可点击提示，`force` 直接重推所有在线玩家。
 
-## 11. 实现进度
+客户端只保留最后收到的包；同一时刻只允许本插件推送，是部署前提。
 
-| 里程碑 | 状态 | 说明 |
-|---|---|---|
-| M0 | 完成 | rustup 1.29.3，rustc/cargo 1.100.0（x86_64-pc-windows-msvc） |
-| M1 | 完成 | Kotlin 2.4.21 + shadow 9.6.1，resource-pack-service.jar 约 1.9 MB |
-| M2 | 完成 | 命令层由 Kotlin 提供（command/RpsCommand.kt）；配置解析仍留在 Java 的 RpsConfig record —— 它是跨语言边界类型，按第 3 节边界规则不搬 |
-| M3 | 完成 | Merger 接口 + RustPackMerger（唯一实现，Java 版已删除）；PackPublisher 按需取用 |
-| M4 | 完成 | rust/rps-pack：14 个 cargo test 全绿，release 产物 752 KB |
-| M5 | 完成 | rps-pack 二进制随 jar 内置并自动解出；缺失时构建直接报错，不回退 |
-| M6 | 完成 | EntryManifest 记录条目 sha1，/rps diff 报新增/变更/删除；双实现对拍测试 |
+## 8. 权限
 
-### 11.1 已修正的合并缺陷
+| 节点 | 默认 | 说明 |
+| --- | --- | --- |
+| `rps.use` | true | 进入 `/rps`；玩家可 `/rps push` 给自己 |
+| `rps.status` / `list` / `diff` / `check` | op | 查看类 |
+| `rps.build` / `reload` / `push` | op | 管理类 |
+| `rps.admin` | op | build/reload/push/check 的集合 |
+| `rps.*` | op | 全部子节点 |
 
-初版 Java 合并器在层序上取反（低优先级胜），且 lang/sounds 的结构合并未真正生效。重写后由 PackMergerTest 覆盖：双层 lang 合并、同名路径高层覆盖、同内容去重、同输入两次 sha1 一致。
+玩家对别人执行 `/rps push <玩家>` 仍需要 `rps.push` 或 `rps.admin`；
+命令帮助和 tab 补全按真实权限过滤。
 
-### 11.2 已落地类
+## 9. 失败与降级
 
-| 层 | 类 | 职责 |
-|---|---|---|
-| Java | ResourcePackServicePlugin | 生命周期、reload、异步调度入口 |
-| Java | api/PackSource、api/ResourcePackService | 对外标准：来源接口与统一入口，纯 JDK 类型 |
-| Java | pack/RegisteredSources | 维护插件注册的来源，投进合并注册表；reload 后重新投回 |
-| Java | pack/PackConflictScanner | 扫 `plugins/*/config*.yml` 里的资源包地址/开关，供 `/rps check` 提示疑似自带下发的插件 |
-| Java | bridge/DispatchBridge | 反射接下发宿主：动态代理 provider，注册/刷新/推送/注销 |
-| Java | pack/PackPublisher | 单飞构建、staging 转 merged.zip、世代递增、push.mode 处理 |
-| Java | core/ZipSource | 合并层的文件来源（id/path/priority/sha1/命名空间） |
-| Java | pack/PackView | 提供者取值接口（版本/地址/sha1 随快照变化） |
-| Java | watch/SourceWatcher | Folia AsyncScheduler 轮询来源 mtime |
-| Kotlin | command/RpsCommand | /rps status、list、build、reload、push、check、diff 与补全 |
-| Kotlin | command/PackMessages | MiniMessage 文案 |
+| 场景 | 行为 |
+| --- | --- |
+| 没有来源 | 构建失败，保留上一版，`/rps status` 显示原因 |
+| 来源文件不存在 | 构建失败，保留上一版 |
+| rps-pack 缺失/不可执行 | `SEVERE`，保留上一版；jar 内置版会先尝试解出 |
+| 合并超时 | 杀掉子进程，构建失败，保留上一版 |
+| 合并输出非法 JSON/非零退出 | 构建失败，保留上一版 |
+| 合成包超过 `merge.max-bytes` | 构建失败，保留上一版 |
+| HTTP 端口被占用 | 记录 `SEVERE`；若填了 `public-url` 仍可推送 |
+| `public-url` 指向回环 | `/rps check` 警告，远程玩家会下载失败 |
+
+没有“自动回退到 Java 合并器”：Rust 是唯一实现，缺失就明确报错，避免两份实现结果不一致。
+
+## 10. 测试
+
+- Java：`./gradlew test`，36 项，覆盖 API 注册表、URL 拼接、HTTP 出口、内置二进制解出、
+  Rust 合并器集成、条目清单、插件描述符、配置体检扫描等。
+- Rust：`cd rust/rps-pack && cargo test`，14 项集成测试，覆盖层序、冲突策略、
+  JSON 深合并、mcmeta 交集、确定性、zip slip、缺失 mcmeta 等。
+- CI 在 Ubuntu 上同时跑 `cargo test` 与 `./gradlew build`，并把合并器路径通过
+  `RPS_PACK_BIN` 传给集成测试。
+
+## 11. 里程碑
+
+| 里程碑 | 内容 | 状态 |
+| --- | --- | --- |
+| M0 | Rust 工具链与空 crate | 完成 |
+| M1 | Kotlin + Shadow 构建骨架 | 完成 |
+| M2 | 配置、来源注册表、命令 | 完成 |
+| M3 | `Merger` 抽象与 `RustPackMerger`（唯一实现） | 完成 |
+| M4 | `rps-pack` 合并、去重、JSON 深合并 | 完成 |
+| M5 | 二进制随 jar 内置、缺失即报错、无回退 | 完成 |
+| M6 | 条目差异、内置 HTTP、进服推送、部署文档 | 完成 |
+| M7 | 社区资源包 PR 校验与自动发版 | 完成 |
+| M8 | 真实 Folia 服务端端到端联调 | 待做 |
+
+## 12. 已知风险与取舍
+
+1. **整包重下**：原版没有增量协议；只能靠 sha1 跳过同内容、把高频内容移出包、
+   以及压缩体积。`/rps diff` 用于判断变更是否值得全服重下。
+2. **端口暴露**：内置 HTTP 默认监听 `0.0.0.0`，需要防火墙只放行游戏入口；
+   公网部署建议反代 + HTTPS。
+3. **单包限制**：无法按玩家给不同资源包；需要分组时只能拆分服务器或改用客户端 mod。
+4. **平台绑定**：jar 内置的是构建机平台的合并器；Linux 服务端请用 Linux CI 产物。
+5. **插件冲突**：别的插件直接 `setResourcePack` 时无法仲裁，只能靠 `/rps check` 发现并关掉对方。
+6. **max-bytes 是构建期闸门**：超限时保留上一版，不会截断或拆分。

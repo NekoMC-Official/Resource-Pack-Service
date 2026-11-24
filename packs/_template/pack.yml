@@ -1,0 +1,5 @@
+id: example
+name: 示例资源包
+priority: 0
+description: 复制这个目录并改名后开始写自己的资源包
+license: CC-BY-4.0

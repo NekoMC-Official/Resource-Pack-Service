@@ -1,52 +1,53 @@
-# 合成后的资源包由服务器已有的下发宿主统一推送；本插件只决定"包里有什么"。
+# 资源包服务配置
 provider:
-  # 注册给下发宿主的槽位标识，同 id 重复注册即覆盖
-  id: "resourcepack-service/active"
-  priority: 0
-  # true 客户端点"否"当场断开；日常保持 false
+  # 资源包是否必装：true 时客户端拒绝会断开连接
   required: false
-  # 非空则作为客户端下载提示语，留空用客户端默认
+  # 客户端看到的一句提示
   prompt: ""
 
 merge:
-  # override：高优先级覆盖低优先级并记录冲突
-  # strict：存在内容冲突时构建失败，保留上一版
-  # first：低优先级胜，仅用于排查
   policy: override
-  # 合并计算全部交给 rps-pack：优先用这里的路径，找不到就用 jar 内置的那份
   rust:
-    # 相对插件数据目录，部署时把 build/dist/bin/rps-pack.exe 放到 plugins/ResourcePackService/bin/
+    # rps-pack 可执行文件；留空或找不到时用 jar 内置的那份
     binary: "bin/rps-pack"
     timeout-ms: 60000
-  # lang / font / atlases / sounds 做结构合并，其余按路径覆盖
   json-merge: true
-  # auto 取所有子包都能接受的版本；也可写死数字
+  # auto 表示交给 rps-pack 自己判断；也可写 15 / 34 这种具体格式号
   pack-format: auto
-  # 合成包体积上限（字节），超过只告警不阻断
   max-bytes: 104857600
   description: "NekoMC 统一资源包"
 
 output:
   dir: "merged"
-  # 必须是对外可下载的完整地址；合成后自动追加 ?v=<世代>
-  public-url: "https://example.com/packs/merged.zip"
-  http:
-    enabled: false
-    port: 25583
 
-# 层序：priority 小的先叠，大的后叠（后叠覆盖先叠）
+# 本插件自己的下发通道，不依赖其它插件
+delivery:
+  # 玩家进服后延迟多少 tick 推送，1 表示下一 tick
+  join-delay-ticks: 1
+  # 是否把客户端进度（加载成功/拒绝）回显给玩家
+  status-feedback: true
+  http:
+    # 内置下载出口；关掉就必须手工填 public-url
+    enabled: true
+    bind: 0.0.0.0
+    port: 25580
+    path: /pack/merged.zip
+    # 公网地址；填了就以它为准，适合放在反向代理后面
+    public-url: ""
+
 sources:
   - id: "bettermodel/base"
     enabled: true
     path: "plugins/BetterModel/build.zip"
     priority: -100
-    namespaces: ["bettermodel"]
+    namespaces:
+      - "bettermodel"
 
 watch:
   enabled: true
   interval-seconds: 60
 
-# 重建后的在线处理：none 什么都不做 | notify 给提示 | force 强制推送
 push:
+  # none 只落盘；notify 提示玩家点击下载；force 直接强制重推
   mode: "notify"
-  notify-message: "<yellow>资源包已更新，输入 <click:run_command:'/companion pack update'><white>/companion pack update</white></click> 或重新进服即可应用。"
+  notify-message: "<gold>资源包已更新，<click:run_command:'/rps push'><u>点这里重新下载</u></click></gold>"

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: '26'
+      - uses: gradle/actions/setup-gradle@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/rps-pack
+      - name: Normalize wrapper
+        run: sed -i 's/\r$//' gradlew && chmod +x gradlew
+      - name: Rust tests
+        run: cargo test --manifest-path rust/rps-pack/Cargo.toml
+      - name: Build plugin jar
+        run: |
+          cargo build --release --manifest-path rust/rps-pack/Cargo.toml
+          RPS_PACK_BIN="$PWD/rust/rps-pack/target/release/rps-pack" ./gradlew build --no-daemon
+      - name: Upload jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: resource-pack-service-linux-x86_64
+          path: build/libs/resource-pack-service.jar
+          if-no-files-found: error

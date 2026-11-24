@@ -1,0 +1,35 @@
+java:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/main/java/**'
+          - 'src/test/java/**'
+
+kotlin:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/main/kotlin/**'
+
+rust:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'rust/**'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'build.gradle.kts'
+          - 'settings.gradle.kts'
+          - 'gradle/**'
+
+pack:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'packs/**'
+          - 'tools/packs.py'

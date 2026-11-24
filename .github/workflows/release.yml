@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: '26'
+      - uses: gradle/actions/setup-gradle@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/rps-pack
+      - name: Build
+        shell: bash
+        run: |
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo build --release --manifest-path rust/rps-pack/Cargo.toml
+          BIN="$PWD/rust/rps-pack/target/release/rps-pack"
+          if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
+          RPS_PACK_BIN="$BIN" ./gradlew build --no-daemon -Pversion="$VERSION"
+          cp build/libs/resource-pack-service.jar "resource-pack-service-${VERSION}-${{ matrix.platform }}.jar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: resource-pack-service-${{ matrix.platform }}
+          path: resource-pack-service-*.jar
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: resource-pack-service-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.jar
+          generate_release_notes: true
+          fail_on_unmatched_files: true

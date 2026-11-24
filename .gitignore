@@ -14,3 +14,7 @@ rust/**/target/
 # Local scratch
 .tmp/
 *.log
+
+# Python
+__pycache__/
+*.pyc

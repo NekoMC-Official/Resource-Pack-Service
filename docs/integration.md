@@ -1,175 +1,246 @@
-# 接入方式详解
+# 接入方式
 
-本服务只做两件事：把各插件产出的 zip 合成一个，再交给下发宿主推送。接入方式按
-"你的插件能不能改代码" 与 "是否要求开箱即用" 分成四种，另有两条反例。
+本服务只认一件事：**一个本地 zip 文件**。谁产出、怎么产出、什么时候更新都不限制；
+服务负责把它和其它来源合成一份，再统一下发。
 
-## 0. 一张图看清数据流
+下面按“改动量从大到小”列四种接入方式。选一种即可，不要同时用两种往同一个客户端发包。
+
+## 数据流
 
 ```mermaid
 flowchart LR
-    subgraph 来源["来源（谁提供 zip）"]
-        A1["插件 A<br/>实现 PackSource"]
-        A2["插件 B<br/>实现 PackSource"]
-        A3["插件 C<br/>只产出 zip 文件"]
-        A4["config.yml<br/>sources 列表"]
-    end
-
-    A1 -- "service.register()" --> S["ResourcePackService<br/>（Bukkit Services）"]
-    A2 -- "service.register()" --> S
-    S --> R[("SourceRegistry<br/>id / path / priority")]
-    A3 -- "运维加一条配置" --> R
-    A4 --> R
-
-    R -- "按 priority 升序" --> M["rps-pack<br/>合并 + 冲突判定"]
-    M --> Z["merged.zip<br/>sha1 + 世代 N"]
-    Z -- "url?v=N" --> H["下发宿主<br/>注册/推送/进服同步"]
-    H --> C["客户端"]
+    P1[插件 A<br/>实现 PackSource] --> R[来源注册表]
+    P2[插件 B<br/>自己打 zip] --> R
+    P3[config.yml<br/>sources] --> R
+    P4[远程 URL<br/>先下载] --> R
+    R --> M[合并 rps-pack]
+    M --> Z[merged.zip]
+    Z --> H[内置 HTTP]
+    Z --> S[进服推送]
+    H --> C[客户端]
+    S --> C
 ```
 
-关键点：**所有来源最终都落到同一张注册表**，因此四种接入方式可以混用；优先级决定层序，
-不决定"谁能发包"。
+无论哪条路，最终只有本服务调用 `setResourcePack`。客户端一个连接只保留一个服务端包。
 
-## 1. 模式一：插件自己实现 PackSource（推荐）
+## 方式一：插件实现 PackSource（推荐）
 
-适用：插件自己生成资源包（模型、音效、UI 材质），愿意加十几行代码。
+适合“资源包由插件自己生成、内容会跟着插件状态变”的场景。
 
-```java
-public final class YourPlugin extends JavaPlugin {
-    private ResourcePackService service;
+### 1. 编译期依赖
 
-    @Override
-    public void onEnable() {
-        service = getServer().getServicesManager().load(ResourcePackService.class);
-        if (service == null) {
-            getLogger().warning("Resource Pack Service 未安装，资源包不会合入");
-            return;
-        }
-        service.register(new PackSource() {
-            @Override public String id() { return "yourplugin"; }
-            @Override public Path file() { return getDataFolder().toPath().resolve("build.zip"); }
-            @Override public int priority() { return 10; }
-        });
-    }
+在插件项目里把本服务的 jar 作为 `compileOnly`：
 
-    @Override
-    public void onDisable() {
-        if (service != null) {
-            service.unregister("yourplugin");
-        }
-    }
+```kotlin
+dependencies {
+    compileOnly(files("libs/resource-pack-service.jar"))
 }
 ```
 
-要点：
+运行期不需要把本服务打进你的 jar；它由服务端单独安装。
 
-- `register` 会触发一次**异步重建**，不阻塞主线程；重复注册同 id 即替换。
-- 内容更新后重新 `register` 一次即可；**版本号由本服务统一递增**，插件不用自己维护。
-- `onDisable` 记得 `unregister`：来源指向的文件若被删，构建会失败并保留上一版。
-- 只合并**本地文件**。远程 CDN 地址请先下载到本地再注册（见模式四）。
+### 2. 实现来源
 
-## 2. 模式二：插件产出的是目录，不是 zip
+```java
+import java.nio.file.Path;
+import java.util.List;
+import moe.nekomc.resourcepack.api.PackSource;
 
-适用：插件把材质写在 `plugins/YourPlugin/assets/...`，没有打包能力。
+public final class CosmeticsPack implements PackSource {
+    private final Path file;
 
-两种做法：
+    public CosmeticsPack(Path file) {
+        this.file = file;
+    }
 
-1. 插件内用 `ZipOutputStream` 打成 zip 再注册（推荐，构建时机可控）。
-2. 交给运维：把目录打成 zip 后写进 `config.yml` 的 `sources`，走模式三。
+    @Override public String id() { return "myplugin/cosmetics"; }
+    @Override public Path file() { return file; }
+    @Override public int priority() { return 100; }
+    @Override public List<String> namespaces() { return List.of("myplugin"); }
+}
+```
 
-不要直接把目录塞进 `PackSource.file()`——合并器只接受 zip。
+- `id` 全局唯一，建议 `插件名/用途`。和配置里的来源同 id 时，你注册的会覆盖配置。
+- `file` 每次构建时读取。文件不存在会让这次构建失败并保留上一版，不会发空包。
+- `priority` 越大越靠上层；同路径冲突时上层赢。
+- `sha1` 默认 null，由服务计算；只有你自己缓存了哈希且能保证一致时才覆盖。
+- `namespaces` 只用于 `/rps list` 与冲突报告，不改变合并。
 
-## 3. 模式三：零代码，运维侧配置
+### 3. 注册与注销
 
-适用：插件是第三方闭源包，只在那台服务器上产出文件（例：`plugins/BetterModel/build.zip`）。
+```java
+import moe.nekomc.resourcepack.api.ResourcePackService;
+import org.bukkit.Bukkit;
+
+ResourcePackService service = Bukkit.getServicesManager().load(ResourcePackService.class);
+if (service == null) {
+    getLogger().warning("没有安装 Resource Pack Service，资源包不会统一下发");
+    return;
+}
+
+service.register(new CosmeticsPack(getDataFolder().toPath().resolve("pack.zip")));
+
+// onDisable
+service.unregister("myplugin/cosmetics");
+```
+
+`register` 会立即触发一次异步重建。如果 zip 是异步生成的，等生成完再调一次
+`service.rebuild(false)`；`announce=true` 会按 `push.mode` 通知在线玩家。
+
+需要立刻让某个玩家重载：
+
+```java
+service.push(player.getUniqueId(), false); // force=false 走普通重载
+```
+
+### 4. zip 里放什么
+
+```text
+pack.zip
+  pack.mcmeta            # 可选；不带就不限制 pack_format
+  assets/myplugin/...    # 必须放在自己的命名空间下
+```
+
+- 命名空间不要用 `minecraft`，也不要用别人的。
+- 不带 `pack.mcmeta` 时，服务会把它当作“不限制格式”，条目照常合入。
+- 带了 `pack.mcmeta` 时，`pack_format` / `supported_formats` 会参与所有来源的交集计算；
+  交集为空则整次构建失败。
+- 不需要自己写 `pack.mcmeta` 的 `description`，服务会统一重建。
+
+## 方式二：插件自己打 zip，再登记路径
+
+适合“插件已经在产目录/文件，但不想引入编译依赖”的场景。
+
+```java
+Path dir = getDataFolder().toPath().resolve("generated");
+Path zip = getDataFolder().toPath().resolve("pack.zip");
+
+try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(zip))) {
+    out.setLevel(Deflater.BEST_COMPRESSION);
+    try (Stream<Path> walk = Files.walk(dir)) {
+        for (Path path : walk.filter(Files::isRegularFile).sorted().toList()) {
+            String name = dir.relativize(path).toString().replace('\\', '/');
+            ZipEntry entry = new ZipEntry(name);
+            entry.setTime(315532800000L); // 1980-01-01，固定时间戳
+            out.putNextEntry(entry);
+            Files.copy(path, out);
+            out.closeEntry();
+        }
+    }
+}
+
+service.register(new CosmeticsPack(zip));
+```
+
+注意：
+
+- 路径分隔符必须是 `/`，不要用 Windows 的 `\\`。
+- 时间戳固定，内容不变时 sha1 才不变；否则每次都会全服重下。
+- 目录里不要把缓存、日志、源文件打进去。
+- 大文件先自己压缩；服务只做合并，不做纹理压缩。
+
+## 方式三：只改 config.yml（零代码）
+
+适合“插件已经把 zip 落在固定路径”，或者运维手工放包。
 
 ```yaml
 sources:
   - id: "bettermodel/base"
     enabled: true
-    path: "plugins/BetterModel/build.zip"   # 相对服务器根目录
-    priority: -100                          # 越小越靠底层
-    namespaces: ["bettermodel"]             # 仅用于报告
+    path: "plugins/BetterModel/build.zip"
+    priority: -100
+    namespaces: ["bettermodel"]
+
+  - id: "community/seasonal"
+    enabled: true
+    path: "community-pack.zip"
+    priority: 10
 ```
 
-保存后 `/rps reload`，或等 `watch` 轮询到文件 mtime 变化自动重建。
+改完：
 
-要点：
-
-- 同一 id 又被插件注册时，**插件注册的优先**（reload 后会把注册来源重新投回）。
-- 轮询覆盖所有来源（配置 + 插件注册），间隔由 `watch.interval-seconds` 决定。
-- 适合"文件由别的插件重写"的场景，例如对方 `/reload` 后重写 `build.zip`。
-
-## 4. 模式四：只有远程地址
-
-当前合并层只读本地文件，**不支持直接给 URL**。两条路：
-
-1. 插件先下载到 `getDataFolder()/cache.zip`，校验后注册（推荐，插件自己知道更新时机）。
-2. 提 Issue 说明需求，后续版本加 `RemoteSource`（列表、缓存、失败保旧）。
-
-## 5. 模式五：提 PR，让来源开箱即用
-
-适用：希望"装上就能用"，不要求运维写配置。
-
-在 `config.yml` 的 `sources:` 加默认条目，附最小 zip 测试，提 PR；合入后随下一个
-发行版本发布。流程见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
-
-## 6. 反例：不要做的事
-
-| 做法 | 后果 |
-|---|---|
-| 自己调 `Player#setResourcePack` | 与宿主抢下发权，玩家可能装两份或在进服时被顶掉 |
-| 另注册一个宿主 provider | 合成包被自己的包顶掉，等于绕过了合并 |
-| 直接改 `server.properties` 的 `resource-pack` | 原版会在配置阶段抢先推旧包，且派生出第二个 UUID |
-| 在 `sources` 里填远程 URL | 合并器只接受本地 zip，会构建失败并保留旧版 |
-
-## 7. 注册、合并、下发时序
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant P as 插件
-    participant S as ResourcePackService
-    participant R as SourceRegistry
-    participant M as PackPublisher + rps-pack
-    participant H as 下发宿主
-    participant C as 客户端
-
-    P->>S: register(new PackSource(){...})
-    S->>R: put(ZipSource)
-    S->>M: rebuild(false) 异步单飞
-    M->>M: 合并 / 记录冲突 / 算 sha1
-    alt sha1 变化
-        M->>M: 世代 +1，写 merged.zip
-        M->>H: 刷新 provider（url?v=N）
-    else 内容未变
-        M-->>S: 直接返回，不换代
-    end
-    C->>H: 进服
-    H-->>C: 下发资源包（1 tick 内自动同步）
-    Note over P,H: 需要立即重推在线玩家时，插件或运维调用 service.push(uuid, force)
+```text
+/rps reload
+/rps status
+/rps list
 ```
 
-## 8. 层序与冲突
+`path` 相对服务端根目录。文件不存在时构建失败并保留上一版；`/rps status` 会显示原因。
+如果对方插件会重写这个 zip（例如 `/bettermodel reload` 重建 `build.zip`），
+可以开启 `watch` 让服务轮询 mtime，或在对方重写后执行 `/rps build`。
 
-```mermaid
-flowchart BT
-    B1["bettermodel/base<br/>priority -100"] --> B2["插件 A<br/>priority 10"]
-    B2 --> B3["插件 B<br/>priority 20"]
-    B3 --> OUT["合成包<br/>同名条目由上层覆盖"]
-    OUT --> NOTE["lang / sounds / font / atlases<br/>按 key 深合并，不整文件替换"]
+## 方式四：只有远程 URL
+
+服务不主动下载 URL。远程包必须先落到本地：
+
+```bash
+curl -fL --retry 3 -o plugins/Resource\ Pack\ Service/remote.zip \
+  https://example.com/pack.zip
 ```
 
-- 同路径内容相同 → 去重，不记冲突。
-- 同路径内容不同 → 高优先级胜，`MergeResult.conflicts` 记录 winner/losers。
-- `merge.policy: strict` 时冲突直接失败并保留上一版，适合宁可不下发也不下发错包的场景。
-- `pack.mcmeta` 不参与合并：按所有来源的 `pack_format` 取交集重建。
+然后按方式二或方式三登记本地路径。原因：
 
-## 9. 怎么选
+- 构建必须确定性、可离线复现；
+- 远程地址可能在构建时不可达，不能把服务器启动绑在外部网络上；
+- 避免 SSRF 与“下载到一半”的半成品。
 
-| 你的情况 | 选 |
-|---|---|
-| 能改代码、自己产 zip | 模式一 |
-| 只能产目录 | 模式二（自己打包）或模式三 |
-| 闭源、文件由它自己重写 | 模式三 |
-| 只有远程 URL | 先下载到本地再注册（模式四） |
-| 想开箱即用、愿意提 PR | 模式五 |
+如果远程包由 CDN 托管且你只想改下载地址，不需要把它当来源：把合成结果同步到 CDN，
+再设置 `delivery.http.public-url` 即可。
+
+## 方式五：把包提进仓库（社区资源包）
+
+适合公开分发的材质包。按 `packs/<id>/` 放 `pack.yml`、`pack.mcmeta`、
+`assets/<namespace>/`，提 PR 后由机器人校验、预览、合并发版。规范见
+[packs/README.md](../packs/README.md)。
+
+## 选型表
+
+| 场景 | 选哪种 | 原因 |
+| --- | --- | --- |
+| 插件自己生成材质，随状态变化 | 方式一 | 注册即触发重建，生命周期清晰 |
+| 插件产目录，不想加编译依赖 | 方式二 | 自己打 zip，只登记路径 |
+| 插件已产固定 zip，运维接手 | 方式三 | 零代码，改配置即可 |
+| 包在远程/CDN | 方式四 | 先本地化，保证构建可复现 |
+| 公开材质包，想走 PR 流程 | 方式五 | 自动校验与发版 |
+
+## 冲突处理
+
+### 路径冲突
+
+两个来源有同一个 `assets/...` 路径且内容不同：
+
+| `merge.policy` | 结果 |
+| --- | --- |
+| `override`（默认） | 高优先级覆盖低优先级 |
+| `first` | 低优先级保留 |
+| `strict` | 构建失败，报告冲突路径与来源 |
+
+`/rps list` 看优先级，`/rps status` 看最近一次构建的冲突摘要，`/rps diff` 看条目变化。
+
+### 命名空间冲突
+
+两个插件都用 `assets/myplugin/`：不会报错，但会互相覆盖。约定：
+
+- 命名空间用插件名小写；
+- 公共库（如通用 UI 材质）单独占一个命名空间，不要塞进业务命名空间；
+- 在 `namespaces` 里声明，便于 `/rps list` 发现撞车。
+
+### 与其它下发插件冲突
+
+| 对方行为 | 结果 | 处置 |
+| --- | --- | --- |
+| 只产 zip，不推送 | 不冲突 | 加进 `sources` 或让它注册 |
+| 自己调 `Player#setResourcePack` | 后发者覆盖，客户端只剩一个包 | 关掉对方推送，只保留文件；`/rps check` 会扫可疑配置 |
+| 调用别的下发 API 注册 provider | 对方可能整包顶掉合成包 | 关掉对方注册，或让它的来源改走本服务 |
+| 原版 `server.properties` 配了 `resource-pack` | 配置阶段抢先推旧包 | 两项清空 |
+
+本服务不拦截别人的 `setResourcePack`，也拿不到“谁最后发”的事件；只能靠部署时保证
+只有一个出口。`/rps check` 是发现问题的第一道闸，不是运行时仲裁。
+
+## 反例
+
+- ❌ 自己写 `PlayerJoinEvent` 再 `setResourcePack`：和本服务抢同一个客户端包。
+- ❌ 把远程 URL 直接写进 `sources.path`：服务只读本地文件。
+- ❌ 在来源 zip 里塞 `pack.mcmeta` 并指望它生效：会被丢弃后统一重建。
+- ❌ 每次构建都写当前时间戳：sha1 每次都变，全服反复重下。
+- ❌ 用 `minecraft` 命名空间：和原版资源冲突，升级时必炸。

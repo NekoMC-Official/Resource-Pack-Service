@@ -1,8 +1,13 @@
 package moe.nekomc.resourcepack.command
 
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.Path
+import java.util.Locale
+import java.util.Properties
 import moe.nekomc.resourcepack.ResourcePackServicePlugin
 import moe.nekomc.resourcepack.pack.PackConflictScanner
+import moe.nekomc.resourcepack.pack.PackSnapshot
 import net.kyori.adventure.text.minimessage.MiniMessage
 import org.bukkit.command.Command
 import org.bukkit.command.CommandExecutor
@@ -10,19 +15,32 @@ import org.bukkit.command.CommandSender
 import org.bukkit.command.TabCompleter
 import org.bukkit.entity.Player
 
-/** /rps 命令树：状态、来源、重建、重载、推送、体检。 */
+/**
+ * /rps 命令树。
+ *
+ * 只做编排：读发布器快照、调下发器、把结果排版成消息；所有副作用都在别的类里。
+ */
 class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecutor, TabCompleter {
 
-    private val mini = MiniMessage.miniMessage()
+    private val subcommands = listOf("status", "list", "build", "reload", "push", "check", "diff")
 
-    override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
+    override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<String>): Boolean {
         if (!sender.hasPermission("rps.use")) {
-            send(sender, PackMessages.error("需要权限 rps.use"))
+            sender.sendMessage(render(PackMessages.error("你没有使用 /rps 的权限")))
             return true
         }
-        val sub = args.firstOrNull()?.lowercase() ?: if (allowed(sender, "status")) "status" else "help"
-        if (sub != "help" && sub in SUBCOMMANDS && !allowed(sender, sub)) {
-            send(sender, PackMessages.error("需要权限 rps." + sub + "（或 rps.admin）"))
+        if (args.isEmpty()) {
+            help(sender)
+            return true
+        }
+        val sub = args[0].lowercase(Locale.ROOT)
+        if (sub != "help" && sub !in subcommands) {
+            sender.sendMessage(render(PackMessages.error("未知的子命令：" + args[0])))
+            help(sender)
+            return true
+        }
+        if (sub != "help" && !canUseSub(sender, sub)) {
+            sender.sendMessage(render(PackMessages.error("你没有 rps." + sub + " 权限")))
             return true
         }
         when (sub) {
@@ -38,157 +56,235 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
         return true
     }
 
-    override fun onTabComplete(sender: CommandSender, command: Command, alias: String, args: Array<out String>): List<String> {
-        if (args.size <= 1) {
-            val prefix = args.firstOrNull()?.lowercase() ?: ""
-            return SUBCOMMANDS.filter { it.startsWith(prefix) && allowed(sender, it) }
-        }
-        if (args[0].equals("push", ignoreCase = true) && args.size == 2) {
-            val prefix = args[1].lowercase()
-            return plugin.server.onlinePlayers.map { it.name }.filter { it.lowercase().startsWith(prefix) }
-        }
-        return emptyList()
-    }
-
-    private fun diff(sender: CommandSender) {
-        val lines = plugin.publisher().diffReport()
-        if (lines.isEmpty()) {
-            send(sender, PackMessages.info("还没有可比的两版合成包，先跑一次 /rps build"))
-            return
-        }
-        for (line in lines) {
-            send(sender, PackMessages.info(line))
-        }
-    }
-
     private fun status(sender: CommandSender) {
-        val config = plugin.config()
-        val snapshot = plugin.publisher().snapshot()
-        send(sender, PackMessages.info("资源包状态"))
-        send(sender, PackMessages.field("槽位", config.providerId()))
-        send(sender, PackMessages.field("世代", snapshot.version().toString()))
-        send(sender, PackMessages.field("地址", snapshot.url().ifBlank { "（未配置 output.public-url）" }))
-        send(sender, PackMessages.field("sha1", snapshot.sha1().ifBlank { "（尚未构建）" }))
-        send(sender, PackMessages.field("体积", if (snapshot.bytes() > 0) PackMessages.bytes(snapshot.bytes()) else "—"))
-        send(sender, PackMessages.field("来源", plugin.registry().ordered().size.toString() + " 个"))
-        send(sender, PackMessages.field("合并引擎", plugin.publisher().engineLabel() + "（rps-pack）"))
-        val active = plugin.bridge().activeProvider()
-        if (active.isNotBlank() && active != config.providerId()) {
-            send(sender, PackMessages.error("下发权不在本服务：" + active + "，合成包不会下发（调高 provider.priority，或关掉对方的推送）"))
+        val snapshot = plugin.publisher()?.snapshot() ?: PackSnapshot.empty()
+        val delivery = plugin.delivery()
+        sender.sendMessage(render(PackMessages.info("合成包状态")))
+        sender.sendMessage(render(PackMessages.field("下发方式", delivery?.name() ?: "本插件内置推送（未就绪）")))
+        if (delivery != null) {
+            sender.sendMessage(render(PackMessages.field("下发细节", delivery.detail())))
         }
-        send(sender, PackMessages.field("下发宿主生效", active.ifBlank { "（无）" }))
+        sender.sendMessage(render(PackMessages.field("版本", if (snapshot.version() <= 0) "还没构建过" else "第 " + snapshot.version() + " 版")))
+        sender.sendMessage(render(PackMessages.field("下载地址", if (snapshot.url().isBlank()) "没有可用地址" else snapshot.url())))
+        sender.sendMessage(render(PackMessages.field("摘要", if (snapshot.sha1().isBlank()) "无" else snapshot.sha1())))
+        sender.sendMessage(render(PackMessages.field("大小", if (snapshot.bytes() <= 0L) "无" else PackMessages.bytes(snapshot.bytes()))))
+        sender.sendMessage(render(PackMessages.field("构建时间", if (snapshot.builtAt().isBlank()) "无" else snapshot.builtAt())))
+        sender.sendMessage(render(PackMessages.field("合成摘要", if (snapshot.summary().isBlank()) "无" else snapshot.summary())))
+        sender.sendMessage(render(PackMessages.field("合成引擎", plugin.publisher()?.engineLabel() ?: "未就绪")))
+        sender.sendMessage(render(PackMessages.field("来源数量", plugin.registry()?.all()?.size?.toString() ?: "0")))
+        sender.sendMessage(render(PackMessages.field("变更推送", describePushMode(plugin.config().pushMode()))))
+        val building = plugin.publisher()?.building() == true
+        sender.sendMessage(render(PackMessages.field("当前状态", if (building) "正在合成" else "空闲")))
         if (snapshot.error().isNotBlank()) {
-            send(sender, PackMessages.error("上次构建失败：" + snapshot.error()))
-        }
-        if (plugin.publisher().building()) {
-            send(sender, PackMessages.warn("正在构建"))
+            sender.sendMessage(render(PackMessages.error("上次构建失败：" + snapshot.error())))
         }
     }
 
     private fun list(sender: CommandSender) {
-        val sources = plugin.registry().ordered()
+        val sources = plugin.registry()?.ordered().orEmpty()
         if (sources.isEmpty()) {
-            send(sender, PackMessages.warn("config.yml 的 sources 为空"))
+            sender.sendMessage(render(PackMessages.warn("还没有登记任何来源，可以用 API 注册，或写进 config.yml 的 sources")))
             return
         }
-        send(sender, PackMessages.info("来源层序（先叠 → 后叠）"))
+        sender.sendMessage(render(PackMessages.info("已登记 " + sources.size + " 个来源")))
         for (source in sources) {
-            val exists = source.path()?.let { Files.isRegularFile(it) } == true
-            val mark = if (exists) "<green>✓<reset>" else "<red>✗<reset>"
-            send(sender, "$mark <white>" + source.id() + " <gray>priority=" + source.priority() + " <gray>" + source.path())
+            val state = if (source.enabled()) "启用" else "停用"
+            sender.sendMessage(
+                render(
+                    PackMessages.field(
+                        source.id(),
+                        state + " · 优先级 " + source.priority() + " · " + source.file()
+                    )
+                )
+            )
         }
     }
 
     private fun build(sender: CommandSender) {
-        plugin.publisher().rebuild(true)
-        send(sender, PackMessages.ok("已触发重建，结果见控制台"))
+        val publisher = plugin.publisher()
+        if (publisher == null) {
+            sender.sendMessage(render(PackMessages.error("发布器还没就绪，等一下再试")))
+            return
+        }
+        if (publisher.building()) {
+            sender.sendMessage(render(PackMessages.warn("已经有一次合成在进行")))
+            return
+        }
+        publisher.rebuild(true)
+        sender.sendMessage(render(PackMessages.ok("已开始合成，完成后按 push.mode 处理在线玩家")))
     }
 
     private fun reload(sender: CommandSender) {
         plugin.reload()
-        send(sender, PackMessages.ok("配置已重载，来源 " + plugin.registry().ordered().size + " 个"))
+        sender.sendMessage(render(PackMessages.ok("配置已重载，正在重新合成")))
     }
 
-    private fun push(sender: CommandSender, args: Array<out String>) {
-        val name = args.getOrNull(1)
-        val player: Player? = if (name == null) {
-            sender as? Player
-        } else {
-            plugin.server.getPlayerExact(name)
-        }
-        if (player == null) {
-            send(sender, PackMessages.error("找不到目标玩家"))
+    private fun push(sender: CommandSender, args: Array<String>) {
+        val delivery = plugin.delivery()
+        if (delivery == null) {
+            sender.sendMessage(render(PackMessages.error("下发器还没就绪")))
             return
         }
-        val code = plugin.bridge().push(player.uniqueId, true)
-        if (code == 1) {
-            send(sender, PackMessages.ok("已向 " + player.name + " 推送"))
+        val force = args.any { it.equals("force", ignoreCase = true) }
+        val name = args.drop(1).firstOrNull { !it.equals("force", ignoreCase = true) }
+        if (name == null) {
+            val self = sender as? Player
+            if (self != null) {
+                val pushed = delivery.push(self.uniqueId, force)
+                if (pushed > 0) {
+                    sender.sendMessage(render(PackMessages.ok("已为你重新加载资源包" + if (force) "（强制）" else "")))
+                } else {
+                    sender.sendMessage(render(PackMessages.warn("没有可推送的地址，先等一次构建完成")))
+                }
+                return
+            }
+            var pushed = 0
+            for (player in plugin.server.onlinePlayers) {
+                pushed += delivery.push(player.uniqueId, force)
+            }
+            sender.sendMessage(render(PackMessages.ok("已向 " + pushed + " 名在线玩家推送" + if (force) "（强制）" else "")))
+            return
+        }
+        if (!sender.hasPermission("rps.push") && !sender.hasPermission("rps.admin")) {
+            val self = sender as? Player
+            if (self == null || !name.equals(self.name, true)) {
+                sender.sendMessage(render(PackMessages.error("只能对自己使用 /rps push；给其他玩家推送需要 rps.push")))
+                return
+            }
+        }
+        val target: Player? = plugin.server.getPlayerExact(name)
+        if (target == null) {
+            sender.sendMessage(render(PackMessages.error("找不到在线玩家：" + name)))
+            return
+        }
+        val pushed = delivery.push(target.uniqueId, force)
+        if (pushed > 0) {
+            sender.sendMessage(render(PackMessages.ok("已向 " + target.name + " 推送" + if (force) "（强制）" else "")))
         } else {
-            send(sender, PackMessages.error("推送未排程：没有生效包或玩家不在线"))
+            sender.sendMessage(render(PackMessages.warn("没有可推送的地址，先跑一次 /rps build")))
         }
     }
 
     private fun check(sender: CommandSender) {
-        val config = plugin.config()
-        val issues = ArrayList<String>()
-        val pluginsDir = plugin.dataFolder.parentFile.toPath()
-        val active = plugin.bridge().activeProvider()
-        if (active.isNotBlank() && active != config.providerId()) {
-            issues.add("下发权在 " + active + "，合成包不会被下发")
-        }
-        for (finding in PackConflictScanner.scan(pluginsDir, plugin.dataFolder.name, 10)) {
-            issues.add("疑似自带下发：" + finding.plugin() + "/" + finding.file().fileName + ":" + finding.line() + " " + finding.key() + "=" + finding.value())
-        }
-        if (config.publicUrl().isBlank()) {
-            issues.add("output.public-url 为空，合成包不会下发")
-        }
-        for (source in plugin.registry().ordered()) {
-            val path = source.path()
-            if (path == null || !Files.isRegularFile(path)) {
-                issues.add("来源缺失：" + source.id() + " → " + path)
-            }
-        }
-        val properties = plugin.dataFolder.parentFile.parentFile.toPath().resolve("server.properties").toFile()
-        if (properties.isFile) {
-            val text = properties.readText()
-            for (line in text.lineSequence()) {
-                val trimmed = line.trim()
-                if (trimmed.startsWith("resource-pack=") && !trimmed.removePrefix("resource-pack=").isBlank()) {
-                    issues.add("server.properties 的 resource-pack 未留空，原版会抢先下发旧包")
-                }
-                if (trimmed.startsWith("resource-pack-id=") && !trimmed.removePrefix("resource-pack-id=").isBlank()) {
-                    issues.add("server.properties 的 resource-pack-id 未留空，客户端会装两份")
-                }
-            }
-        }
-        if (issues.isEmpty()) {
-            send(sender, PackMessages.ok("体检通过"))
+        val snapshot = plugin.publisher()?.snapshot() ?: PackSnapshot.empty()
+        sender.sendMessage(render(PackMessages.info("环境检查")))
+        if (snapshot.url().isBlank()) {
+            sender.sendMessage(render(PackMessages.warn("还没有下载地址：确认 delivery.http.enabled 已开且端口未被占用")))
         } else {
-            for (issue in issues) {
-                send(sender, PackMessages.warn(issue))
+            sender.sendMessage(render(PackMessages.field("下载地址", snapshot.url())))
+        }
+        val publicUrl = plugin.config().deliveryPublicUrl()
+        if (publicUrl.isNotBlank()) {
+            val lower = publicUrl.lowercase(Locale.ROOT)
+            if (lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("[::1]")) {
+                sender.sendMessage(render(PackMessages.warn("public-url 指向本机回环地址，只有同机客户端能下载，远程玩家会失败")))
             }
+        }
+        checkServerProperties(sender)
+        val pluginsDir = plugin.dataFolder.toPath().toAbsolutePath().parent
+        if (pluginsDir != null) {
+            val findings = PackConflictScanner.scan(pluginsDir, plugin.dataFolder.name, 10)
+            if (findings.isEmpty()) {
+                sender.sendMessage(render(PackMessages.ok("没有发现别的插件自己配资源包地址")))
+            } else {
+                sender.sendMessage(render(PackMessages.warn("发现 " + findings.size + " 处疑似冲突配置：")))
+                for (finding in findings) {
+                    sender.sendMessage(
+                        render(
+                            PackMessages.field(
+                                finding.plugin(),
+                                finding.file().fileName.toString() + ":" + finding.line() + " " + finding.key() + "=" + finding.value()
+                            )
+                        )
+                    )
+                }
+            }
+        }
+        sender.sendMessage(render(PackMessages.info("客户端每次收到 v 变化的地址才会重新下载，先确认 port 对外可达")))
+    }
+
+    private fun checkServerProperties(sender: CommandSender) {
+        val root = plugin.server.worldContainer.toPath().toAbsolutePath().normalize()
+        val file: Path = root.resolve("server.properties")
+        if (!Files.isRegularFile(file)) {
+            sender.sendMessage(render(PackMessages.warn("找不到 server.properties：" + file)))
+            return
+        }
+        val properties = Properties()
+        try {
+            Files.newBufferedReader(file, StandardCharsets.UTF_8).use { properties.load(it) }
+        } catch (exception: Exception) {
+            sender.sendMessage(render(PackMessages.warn("读不了 server.properties：" + exception.message)))
+            return
+        }
+        var dirty = false
+        for (key in listOf("resource-pack", "resource-pack-id")) {
+            val value = properties.getProperty(key, "").trim()
+            if (value.isNotEmpty()) {
+                dirty = true
+                sender.sendMessage(render(PackMessages.warn("server.properties 的 " + key + " 不为空，会与本插件争抢下发，请清空")))
+            }
+        }
+        if (!dirty) {
+            sender.sendMessage(render(PackMessages.ok("server.properties 的 resource-pack / resource-pack-id 都是空的")))
+        }
+    }
+
+    private fun diff(sender: CommandSender) {
+        val lines = plugin.publisher()?.diffReport(30).orEmpty()
+        if (lines.isEmpty()) {
+            sender.sendMessage(render(PackMessages.warn("还没有可比对的条目清单，先跑一次 /rps build")))
+            return
+        }
+        for (line in lines) {
+            sender.sendMessage(render("<gray>" + line))
         }
     }
 
     private fun help(sender: CommandSender) {
-        val usable = SUBCOMMANDS.filter { allowed(sender, it) }
-        if (usable.isEmpty()) {
-            send(sender, PackMessages.info("你没有可用的子命令，联系管理员分配 rps.* 权限"))
-            return
+        sender.sendMessage(render(PackMessages.info("/rps 命令")))
+        val entries = listOf(
+            "status" to "看版本、下载地址、下发方式",
+            "list" to "看已登记的来源",
+            "build" to "立刻合成一次",
+            "reload" to "重载配置并重新合成",
+            "push" to if (sender is Player) "重新下载资源包给自己；带玩家名则推给别人" else "给在线玩家或指定玩家推送",
+            "check" to "检查地址、端口与配置冲突",
+            "diff" to "对比本次与上次的条目差异"
+        )
+        for ((sub, description) in entries) {
+            if (canUseSub(sender, sub)) {
+                sender.sendMessage(render(PackMessages.field(sub, description)))
+            }
         }
-        send(sender, PackMessages.info("/rps " + usable.joinToString("｜")))
     }
 
-    private fun allowed(sender: CommandSender, sub: String): Boolean {
-        if (sub == "help") return true
-        return sender.hasPermission("rps." + sub) || sender.hasPermission("rps.admin")
+    private fun canUseSub(sender: CommandSender, sub: String): Boolean {
+        if (sub == "push" && sender is Player) {
+            return true
+        }
+        return sub == "help" || sender.hasPermission("rps." + sub) || sender.hasPermission("rps.admin")
     }
 
-    private fun send(sender: CommandSender, text: String) {
-        sender.sendMessage(mini.deserialize(text))
+    private fun describePushMode(mode: String): String = when (mode.lowercase(Locale.ROOT)) {
+        "none" -> "none（只落盘，不打扰玩家）"
+        "force" -> "force（强制重推在线玩家）"
+        else -> "notify（提示玩家点击下载）"
     }
 
-    private companion object {
-        private val SUBCOMMANDS = listOf("status", "list", "build", "reload", "push", "check", "diff")
+    private fun render(text: String) = MiniMessage.miniMessage().deserialize(text)
+
+    override fun onTabComplete(sender: CommandSender, command: Command, alias: String, args: Array<String>): List<String> {
+        if (args.size == 1) {
+            return subcommands.filter { canUseSub(sender, it) }
+        }
+        if (args.size == 2 && args[0].equals("push", ignoreCase = true)) {
+            if (!sender.hasPermission("rps.push") && !sender.hasPermission("rps.admin")) {
+                return listOf("force")
+            }
+            val names = plugin.server.onlinePlayers.map { it.name }
+            return names + "force"
+        }
+        return emptyList()
     }
 }

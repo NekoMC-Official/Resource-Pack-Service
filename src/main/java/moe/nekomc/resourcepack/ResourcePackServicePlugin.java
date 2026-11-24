@@ -1,37 +1,52 @@
 package moe.nekomc.resourcepack;
 
+import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import moe.nekomc.resourcepack.api.PackSource;
 import moe.nekomc.resourcepack.api.ResourcePackService;
-import moe.nekomc.resourcepack.bridge.DispatchBridge;
 import moe.nekomc.resourcepack.command.RpsCommand;
+import moe.nekomc.resourcepack.config.RpsConfig;
 import moe.nekomc.resourcepack.core.EngineConfig;
-import moe.nekomc.resourcepack.core.ZipSource;
-import moe.nekomc.resourcepack.core.RpsConfig;
 import moe.nekomc.resourcepack.core.SourceRegistry;
 import moe.nekomc.resourcepack.core.StateStore;
+import moe.nekomc.resourcepack.core.ZipSource;
+import moe.nekomc.resourcepack.delivery.PackHttpServer;
+import moe.nekomc.resourcepack.delivery.PackPusher;
+import moe.nekomc.resourcepack.pack.Host;
+import moe.nekomc.resourcepack.pack.HostStatus;
 import moe.nekomc.resourcepack.pack.PackPublisher;
+import moe.nekomc.resourcepack.pack.PackSnapshot;
 import moe.nekomc.resourcepack.pack.RegisteredSources;
 import moe.nekomc.resourcepack.watch.SourceWatcher;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
+/**
+ * 插件入口：装配配置、注册表、发布器、下载出口与推送器。
+ *
+ * <p>启动顺序是有讲究的：先有配置和状态，才有发布器；发布器要能在第一次构建时
+ * 拿到下发器拼地址，所以下发器必须在 {@code publisher.rebuild(true)} 之前就位。
+ * 文件监听放在最后，避免开服瞬间被自己的落盘触发一次。</p>
+ */
 public final class ResourcePackServicePlugin extends JavaPlugin {
 
-    private volatile RpsConfig config;
-    private volatile SourceRegistry registry = new SourceRegistry();
-    private volatile StateStore stateStore;
-    private volatile DispatchBridge bridge;
-    private volatile PackPublisher publisher;
-    private volatile SourceWatcher watcher;
-    private volatile RegisteredSources registeredSources;
+    private RpsConfig config;
+    private EngineConfig engineConfig;
+    private SourceRegistry registry;
+    private StateStore stateStore;
+    private PackPublisher publisher;
+    private PackPusher delivery;
+    private SourceWatcher watcher;
+    private RegisteredSources registeredSources;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        this.bridge = new DispatchBridge(this);
-        this.registeredSources = new RegisteredSources(this::registry, new RegisteredSources.Host() {
+        registeredSources = new RegisteredSources(this::currentRegistry, new Host() {
             @Override
             public void rebuild(boolean announce) {
                 PackPublisher current = publisher;
@@ -41,98 +56,158 @@ public final class ResourcePackServicePlugin extends JavaPlugin {
             }
 
             @Override
-            public RegisteredSources.Status status() {
+            public HostStatus status() {
                 PackPublisher current = publisher;
                 if (current == null) {
-                    return RegisteredSources.Status.empty();
+                    return HostStatus.empty();
                 }
-                PackPublisher.Snapshot snapshot = current.snapshot();
-                return new RegisteredSources.Status(snapshot.version(), snapshot.url(), snapshot.sha1());
+                PackSnapshot snapshot = current.snapshot();
+                return new HostStatus(snapshot.version(), snapshot.url(), snapshot.sha1());
             }
 
             @Override
-            public int push(java.util.UUID player, boolean force) {
-                DispatchBridge current = bridge;
+            public int push(UUID player, boolean force) {
+                PackPusher current = delivery;
                 return current == null ? 0 : current.push(player, force);
             }
         });
+        reload();
         PluginCommand command = getCommand("rps");
-        if (command != null) {
+        if (command == null) {
+            getLogger().warning("plugin.yml 里没有 rps 命令，管理命令不可用");
+        } else {
             RpsCommand executor = new RpsCommand(this);
             command.setExecutor(executor);
             command.setTabCompleter(executor);
         }
-        reload();
-        getServer().getServicesManager().register(
-                ResourcePackService.class, registeredSources, this, ServicePriority.Normal);
-        getLogger().info("已启用，来源 " + registry.ordered().size() + " 个");
+        getServer().getServicesManager().register(ResourcePackService.class, registeredSources, this, ServicePriority.Normal);
+        getLogger().info("资源包服务已启动");
     }
 
     @Override
     public void onDisable() {
-        SourceWatcher current = watcher;
-        if (current != null) {
-            current.stop();
-            watcher = null;
-        }
-        if (bridge != null) {
-            bridge.detach();
-        }
+        stopWatcher();
+        stopDelivery();
+        getServer().getServicesManager().unregisterAll(this);
+        getLogger().info("资源包服务已停止");
     }
 
-    /** 重读 config.yml、重建注册表、重启侦测、立即重建一次。 */
-    public void reload() {
+    /** 重载配置并重建整条链路；命令与文件监听都走这里。 */
+    public synchronized void reload() {
         reloadConfig();
-        Path serverRoot = getDataFolder().getParentFile().getParentFile().toPath();
-        this.config = RpsConfig.load(getConfig(), serverRoot);
-        this.engineConfig = EngineConfig.load(getConfig(), getDataFolder().toPath());
-        if (stateStore == null) {
-            this.stateStore = new StateStore(getDataFolder().toPath().resolve("state.json"));
-        }
+        Path serverRoot = getServer().getWorldContainer().toPath().toAbsolutePath().normalize();
+        Path dataFolder = getDataFolder().toPath();
+        config = RpsConfig.load(getConfig(), serverRoot);
+        engineConfig = EngineConfig.load(getConfig(), dataFolder);
+        stateStore = new StateStore(dataFolder.resolve("state.json"));
 
         SourceRegistry fresh = new SourceRegistry();
         for (ZipSource source : config.sources()) {
             fresh.put(source);
         }
-        this.registry = fresh;
+        registry = fresh;
         if (registeredSources != null) {
             int restored = registeredSources.reapply(fresh);
             if (restored > 0) {
-                getLogger().info("已恢复 " + restored + " 个插件注册的资源包来源");
+                getLogger().info("重载后重投 " + restored + " 个已注册来源");
             }
         }
 
-        SourceWatcher previous = watcher;
-        if (previous != null) {
-            previous.stop();
-        }
-        this.publisher = new PackPublisher(this);
-        if (config.watchEnabled() && config.watchSeconds() > 0) {
-            this.watcher = new SourceWatcher(this, config.watchSeconds(), this::watchedPaths, () -> publisher.rebuild(true));
-            watcher.start();
-        } else {
-            this.watcher = null;
-        }
-
-        if (bridge != null && !bridge.attach(publisher)) {
-            getLogger().warning("资源包不会下发：" + bridge.unavailableReason());
-        }
+        stopWatcher();
+        stopDelivery();
+        publisher = new PackPublisher(this);
+        startDelivery();
         publisher.rebuild(true);
-        getLogger().info("合并引擎：" + publisher.engineLabel());
+        startWatcher();
+    }
+
+    private void startDelivery() {
+        PackHttpServer server = null;
+        if (config.deliveryHttpEnabled()) {
+            PackHttpServer candidate = new PackHttpServer(
+                    config.outputDir().resolve("merged.zip"),
+                    config.deliveryHttpBind(),
+                    config.deliveryHttpPort(),
+                    config.deliveryHttpPath());
+            try {
+                candidate.start();
+                server = candidate;
+                getLogger().info("下载出口已启动：" + candidate.bind() + ":" + candidate.port() + candidate.urlPath());
+            } catch (IOException exception) {
+                getLogger().severe("下载出口启动失败（" + config.deliveryHttpBind() + ":" + config.deliveryHttpPort()
+                        + "）：" + exception.getMessage());
+            }
+        }
+        if (server == null && config.deliveryPublicUrl().isBlank()) {
+            getLogger().severe("self 模式需要 HTTP 出口或手工设置 delivery.http.public-url");
+        }
+        PackPusher pusher = new PackPusher(
+                this, server,
+                config.deliveryJoinDelayTicks(),
+                config.deliveryStatusFeedback(),
+                config.required(),
+                config.prompt());
+        delivery = pusher;
+        getServer().getPluginManager().registerEvents(pusher, this);
+    }
+
+    private void stopDelivery() {
+        PackPusher current = delivery;
+        delivery = null;
+        if (current != null) {
+            current.close();
+        }
+    }
+
+    private void startWatcher() {
+        if (!config.watchEnabled()) {
+            return;
+        }
+        SourceWatcher created = new SourceWatcher(this, config.watchSeconds(), this::watchedPaths, () -> {
+            PackPublisher current = publisher;
+            if (current == null) {
+                return;
+            }
+            getLogger().info("检测到来源文件变化，开始重新合成");
+            current.rebuild(true);
+        });
+        created.start();
+        watcher = created;
+    }
+
+    private void stopWatcher() {
+        SourceWatcher current = watcher;
+        watcher = null;
+        if (current != null) {
+            current.stop();
+        }
     }
 
     private List<Path> watchedPaths() {
-        return registry.ordered().stream().map(ZipSource::path).filter(java.util.Objects::nonNull).toList();
+        List<Path> paths = new ArrayList<>();
+        SourceRegistry current = registry;
+        if (current == null) {
+            return paths;
+        }
+        for (PackSource source : current.ordered()) {
+            Path file = source.file();
+            if (file != null && !paths.contains(file)) {
+                paths.add(file);
+            }
+        }
+        return paths;
     }
 
-    private EngineConfig engineConfig;
-
-    public EngineConfig engineConfig() {
-        return engineConfig;
+    private SourceRegistry currentRegistry() {
+        return registry;
     }
 
     public RpsConfig config() {
         return config;
+    }
+
+    public EngineConfig engineConfig() {
+        return engineConfig;
     }
 
     public SourceRegistry registry() {
@@ -143,16 +218,15 @@ public final class ResourcePackServicePlugin extends JavaPlugin {
         return stateStore;
     }
 
-    public DispatchBridge bridge() {
-        return bridge;
-    }
-
     public PackPublisher publisher() {
         return publisher;
     }
 
-    /** 供其它插件通过 ServicesManager 取得的统一入口。 */
-    public ResourcePackService resourcePackService() {
+    public PackPusher delivery() {
+        return delivery;
+    }
+
+    public RegisteredSources registeredSources() {
         return registeredSources;
     }
 }

@@ -2,12 +2,14 @@ package moe.nekomc.resourcepack.pack;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import moe.nekomc.resourcepack.api.PackSource;
 import moe.nekomc.resourcepack.core.SourceRegistry;
@@ -19,15 +21,15 @@ class RegisteredSourcesTest {
     private final List<Boolean> rebuilds = new ArrayList<>();
 
     private RegisteredSources service() {
-        return new RegisteredSources(() -> registry, new RegisteredSources.Host() {
+        return new RegisteredSources(() -> registry, new Host() {
             @Override
             public void rebuild(boolean announce) {
                 rebuilds.add(announce);
             }
 
             @Override
-            public RegisteredSources.Status status() {
-                return new RegisteredSources.Status(7, "https://cdn.example.com/merged.zip?v=7", "abc");
+            public HostStatus status() {
+                return new HostStatus(7, "https://cdn.example.com/merged.zip?v=7", "abc");
             }
 
             @Override
@@ -61,8 +63,9 @@ class RegisteredSourcesTest {
     void registerFeedsRegistryAndTriggersRebuild() {
         RegisteredSources service = service();
         assertTrue(service.register(source("yourplugin", "packs/a.zip", 10)));
-        assertEquals(List.of("yourplugin"), registry.ordered().stream().map(s -> s.id()).toList());
-        assertEquals(10, registry.get("yourplugin").orElseThrow().priority());
+        assertEquals(List.of("yourplugin"), registry.ordered().stream().map(PackSource::id).toList());
+        assertNotNull(registry.get("yourplugin"));
+        assertEquals(10, registry.get("yourplugin").priority());
         assertEquals(List.of(false), rebuilds);
         assertEquals(7, service.version());
         assertEquals("abc", service.sha1());
@@ -78,20 +81,23 @@ class RegisteredSourcesTest {
     }
 
     @Test
-    void unregisterRemovesSource() {
+    void unregisterRemovesAndRebuilds() {
         RegisteredSources service = service();
-        service.register(source("a", "packs/a.zip", 0));
+        service.register(source("a", "packs/a.zip", 1));
+        rebuilds.clear();
         assertTrue(service.unregister("a"));
         assertFalse(service.unregister("a"));
         assertTrue(registry.all().isEmpty());
+        assertEquals(List.of(false), rebuilds);
     }
 
     @Test
-    void reapplyRestoresAfterReload() {
+    void reapplyRestoresIntoFreshRegistry() {
         RegisteredSources service = service();
-        service.register(source("a", "packs/a.zip", 5));
+        service.register(source("a", "packs/a.zip", 1));
         SourceRegistry fresh = new SourceRegistry();
         assertEquals(1, service.reapply(fresh));
-        assertEquals(List.of("a"), fresh.ordered().stream().map(s -> s.id()).toList());
+        assertEquals(List.of("a"), fresh.all().stream().map(PackSource::id).toList());
+        assertEquals(Set.of("a"), service.sourceIds());
     }
 }

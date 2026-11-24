@@ -1,29 +1,48 @@
 package moe.nekomc.resourcepack;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 
 class PluginDescriptorTest {
 
-    private static String descriptor() throws Exception {
+    private static YamlConfiguration descriptor() throws Exception {
         try (InputStream in = PluginDescriptorTest.class.getResourceAsStream("/plugin.yml")) {
             assertNotNull(in, "plugin.yml 必须打进 jar");
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return YamlConfiguration.loadConfiguration(new InputStreamReader(in, StandardCharsets.UTF_8));
         }
     }
 
     @Test
+    void doesNotDependOnAnyHostPlugin() throws Exception {
+        YamlConfiguration yml = descriptor();
+        assertFalse(yml.contains("depend"), "plugin.yml 不应有 depend");
+        assertFalse(yml.contains("softdepend"), "plugin.yml 不应有 softdepend");
+    }
+
+    @Test
+    void declaresMainClassAndFoliaSupport() throws Exception {
+        YamlConfiguration yml = descriptor();
+        assertEquals("moe.nekomc.resourcepack.ResourcePackServicePlugin", yml.getString("main"));
+        assertEquals("26.3", yml.getString("api-version"));
+        assertTrue(yml.getBoolean("folia-supported"), "必须声明 Folia 支持");
+    }
+
+    @Test
     void declaresGranularPermissions() throws Exception {
-        String yml = descriptor();
-        for (String node : new String[] {"rps.use", "rps.status", "rps.list", "rps.diff",
+        YamlConfiguration yml = descriptor();
+        for (String node : new String[]{"rps.use", "rps.status", "rps.list", "rps.diff",
                 "rps.check", "rps.build", "rps.reload", "rps.push", "rps.admin"}) {
-            assertTrue(yml.contains(node + ":"), "缺少权限节点 " + node);
+            assertNotNull(yml.get("permissions." + node), "缺少权限节点 " + node);
         }
-        assertTrue(yml.contains("permission: rps.use"), "命令入口应受 rps.use 约束");
-        assertTrue(yml.contains("children:"), "rps.admin 应是管理组");
+        assertEquals("rps.use", yml.getString("commands.rps.permission"));
+        assertTrue(yml.getConfigurationSection("permissions.rps.admin").contains("children"), "rps.admin 应是管理组");
     }
 }
