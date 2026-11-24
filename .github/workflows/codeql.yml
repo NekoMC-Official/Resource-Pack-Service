@@ -63,7 +63,7 @@ jobs:
 
       - name: Build Java and Kotlin
         if: matrix.build == 'java'
-        run: ./gradlew compileJava compileKotlin --no-daemon
+        run: ./gradlew compileJava compileKotlin --no-daemon --no-build-cache --rerun-tasks
 
 
       - name: Perform CodeQL Analysis
