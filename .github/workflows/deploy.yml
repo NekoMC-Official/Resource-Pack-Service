@@ -28,7 +28,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pattern "*-${{ inputs.platform }}.jar" \
             --dir dist
-      - uses: webfactory/ssh-agent@v0.9.1
+      - uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
       - name: Copy jar (no restart)
