@@ -1,0 +1,58 @@
+name: Resource Pack Service
+version: '${version}'
+main: moe.nekomc.resourcepack.ResourcePackServicePlugin
+api-version: "26.3"
+folia-supported: true
+depend: [Companion]
+authors: [NekoMC]
+description: 把多个插件的资源包合成一份，交给服务器已有的下发宿主统一下发
+commands:
+  rps:
+    description: 资源包统一下发管理
+    usage: /rps help
+    permission: rps.use
+permissions:
+  rps.*:
+    description: 资源包统一下发的全部权限
+    default: op
+    children:
+      rps.use: true
+      rps.status: true
+      rps.list: true
+      rps.diff: true
+      rps.check: true
+      rps.build: true
+      rps.reload: true
+      rps.push: true
+  rps.use:
+    description: 允许使用 /rps 与查看帮助
+    default: op
+  rps.status:
+    description: 查看下发状态（版本、sha1、在线玩家）
+    default: op
+  rps.list:
+    description: 查看资源包来源与优先级
+    default: op
+  rps.diff:
+    description: 查看最近两版合成包的条目差异
+    default: op
+  rps.check:
+    description: 检查 server.properties 与来源路径
+    default: op
+  rps.build:
+    description: 手动重建合成包
+    default: op
+  rps.reload:
+    description: 重载配置与来源
+    default: op
+  rps.push:
+    description: 向在线玩家重推资源包
+    default: op
+  rps.admin:
+    description: 管理组（等价于 build/reload/push/check）
+    default: op
+    children:
+      rps.build: true
+      rps.reload: true
+      rps.push: true
+      rps.check: true

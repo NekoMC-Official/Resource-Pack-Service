@@ -1,0 +1,502 @@
+//! rps-pack 合并语义的集成测试：fixture 全部用 zip crate 现场生成，不依赖外部文件。
+
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use rps_pack::{merge, Policy, Request, Source};
+
+fn work(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-work")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("创建测试目录");
+    dir
+}
+
+fn mcmeta_bytes(pack_format: i64, supported: Option<serde_json::Value>) -> Vec<u8> {
+    let mut pack = serde_json::json!({
+        "pack_format": pack_format,
+        "description": "fixture",
+    });
+    if let Some(supported) = supported {
+        pack["supported_formats"] = supported;
+    }
+    serde_json::to_vec(&serde_json::json!({ "pack": pack })).expect("序列化 fixture pack.mcmeta")
+}
+
+fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(path).expect("创建 fixture zip");
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, bytes) in entries {
+        zip.start_file(*name, options).expect("写条目");
+        zip.write_all(bytes).expect("写条目内容");
+    }
+    zip.finish().expect("关闭 fixture zip");
+}
+
+fn write_source(
+    path: &Path,
+    pack_format: i64,
+    supported: Option<serde_json::Value>,
+    entries: &[(&str, &[u8])],
+) {
+    let file = std::fs::File::create(path).expect("创建 fixture zip");
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("pack.mcmeta", options).expect("写 pack.mcmeta");
+    zip.write_all(&mcmeta_bytes(pack_format, supported))
+        .expect("写 pack.mcmeta 内容");
+    for (name, bytes) in entries {
+        zip.start_file(*name, options).expect("写条目");
+        zip.write_all(bytes).expect("写条目内容");
+    }
+    zip.finish().expect("关闭 fixture zip");
+}
+
+fn source(id: &str, path: &Path, priority: i64) -> Source {
+    Source {
+        id: id.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        priority,
+    }
+}
+
+fn request(sources: Vec<Source>) -> Request {
+    Request {
+        format: 0,
+        description: "测试资源包".to_string(),
+        policy: Policy::Override,
+        json_merge: true,
+        sources,
+    }
+}
+
+fn read_zip(path: &Path) -> Vec<(String, Vec<u8>)> {
+    let file = std::fs::File::open(path).expect("打开输出 zip");
+    let mut archive = zip::ZipArchive::new(file).expect("输出是合法 zip");
+    let mut entries = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).expect("读取输出条目");
+        let name = entry.name().to_string();
+        let mut buffer = Vec::new();
+        entry.read_to_end(&mut buffer).expect("读取输出条目内容");
+        entries.push((name, buffer));
+    }
+    entries
+}
+
+fn read_timestamps(path: &Path) -> Vec<(String, Option<zip::DateTime>)> {
+    let file = std::fs::File::open(path).expect("打开输出 zip");
+    let mut archive = zip::ZipArchive::new(file).expect("输出是合法 zip");
+    let mut stamps = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).expect("读取输出条目");
+        stamps.push((entry.name().to_string(), entry.last_modified()));
+    }
+    stamps
+}
+
+fn entry<'a>(entries: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+    entries
+        .iter()
+        .find(|(entry_name, _)| entry_name == name)
+        .map(|(_, bytes)| bytes.as_slice())
+}
+
+fn merge_ok(request: &Request, dir: &Path, out: &Path) -> (rps_pack::Report, Vec<(String, Vec<u8>)>) {
+    let report = merge(request, dir, out).expect("合并应当成功");
+    let entries = read_zip(out);
+    (report, entries)
+}
+
+#[test]
+fn single_source_passthrough() {
+    let dir = work("single-source");
+    let base = dir.join("base.zip");
+    write_source(
+        &base,
+        46,
+        None,
+        &[
+            ("assets/minecraft/texts/splash.txt", b"hello".as_slice()),
+            ("pack.png", b"base-logo".as_slice()),
+        ],
+    );
+    let out = dir.join("out.zip");
+    let (report, entries) = merge_ok(&request(vec![source("base", &base, 0)]), &dir, &out);
+
+    assert_eq!(report.format, 46);
+    assert_eq!((report.format_min, report.format_max), (46, 46));
+    assert_eq!(report.entries, 3, "两个文件 + 重建的 pack.mcmeta");
+    assert_eq!(report.deduped, 0);
+    assert!(report.conflicts.is_empty());
+    assert_eq!(
+        entry(&entries, "assets/minecraft/texts/splash.txt"),
+        Some(b"hello".as_slice())
+    );
+    assert_eq!(entry(&entries, "pack.png"), Some(b"base-logo".as_slice()));
+
+    let mcmeta: serde_json::Value =
+        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta"))
+            .expect("pack.mcmeta 是 JSON");
+    assert_eq!(mcmeta["pack"]["pack_format"], 46);
+    assert_eq!(
+        mcmeta["pack"]["supported_formats"],
+        serde_json::json!([46, 46])
+    );
+
+    let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "输出条目必须按名称升序写入");
+
+    for (name, modified) in read_timestamps(&out) {
+        assert_eq!(
+            modified,
+            Some(zip::DateTime::default()),
+            "条目 {name} 的时间戳必须固定为 1980-01-01 00:00:00"
+        );
+    }
+}
+
+#[test]
+fn two_layer_override_conflict() {
+    let dir = work("override");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/models/block/a.json";
+    write_source(&low, 46, None, &[(path, br#"{"from":"low"}"#.as_slice())]);
+    write_source(&high, 46, None, &[(path, br#"{"from":"high"}"#.as_slice())]);
+    let out = dir.join("out.zip");
+
+    let (report, entries) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
+
+    assert_eq!(report.conflicts.len(), 1);
+    let conflict = &report.conflicts[0];
+    assert_eq!(conflict.path, path);
+    assert_eq!(conflict.winner, "high");
+    assert_eq!(conflict.losers, vec!["low".to_string()]);
+    assert_eq!(report.deduped, 0);
+    assert_eq!(
+        entry(&entries, path),
+        Some(br#"{"from":"high"}"#.as_slice()),
+        "override 策略下高层胜"
+    );
+}
+
+#[test]
+fn identical_entries_are_deduped() {
+    let dir = work("dedupe");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/texts/same.txt";
+    write_source(&low, 46, None, &[(path, b"same-bytes".as_slice())]);
+    write_source(&high, 46, None, &[(path, b"same-bytes".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let (report, entries) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
+
+    assert_eq!(report.deduped, 1, "CRC 与大小一致应计一次去重");
+    assert!(report.conflicts.is_empty(), "内容相同不算冲突");
+    assert_eq!(report.entries, 2);
+    assert_eq!(entry(&entries, path), Some(b"same-bytes".as_slice()));
+}
+
+#[test]
+fn lang_json_is_deep_merged() {
+    let dir = work("lang-merge");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/lang/en_us.json";
+    write_source(
+        &low,
+        46,
+        None,
+        &[(path, br#"{"a":"1","b":"low","nested":{"x":1,"keep":true}}"#.as_slice())],
+    );
+    write_source(
+        &high,
+        46,
+        None,
+        &[(path, br#"{"b":"high","c":"3","nested":{"y":2}}"#.as_slice())],
+    );
+    let out = dir.join("out.zip");
+
+    let (report, entries) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
+
+    assert!(report.conflicts.is_empty(), "结构合并不应记为冲突");
+    let merged: serde_json::Value =
+        serde_json::from_slice(entry(&entries, path).expect("lang 条目存在")).expect("合法 JSON");
+    assert_eq!(
+        merged,
+        serde_json::json!({
+            "a": "1",
+            "b": "high",
+            "c": "3",
+            "nested": {"x": 1, "keep": true, "y": 2},
+        })
+    );
+}
+
+#[test]
+fn font_arrays_are_concatenated_high_first() {
+    let dir = work("font-merge");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/font/default.json";
+    write_source(
+        &low,
+        46,
+        None,
+        &[(path, br#"{"providers":[{"type":"a"},{"type":"shared"}]}"#.as_slice())],
+    );
+    write_source(
+        &high,
+        46,
+        None,
+        &[(path, br#"{"providers":[{"type":"shared"},{"type":"b"}]}"#.as_slice())],
+    );
+    let out = dir.join("out.zip");
+
+    let (report, entries) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
+
+    assert!(report.conflicts.is_empty());
+    let merged: serde_json::Value =
+        serde_json::from_slice(entry(&entries, path).expect("font 条目存在")).expect("合法 JSON");
+    assert_eq!(
+        merged,
+        serde_json::json!({
+            "providers": [{"type": "shared"}, {"type": "b"}, {"type": "a"}],
+        }),
+        "高层数组在前，按序列化结果去重"
+    );
+}
+
+#[test]
+fn format_intersection_empty_fails() {
+    let dir = work("format-empty");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    write_source(&low, 5, Some(serde_json::json!([1, 5])), &[]);
+    write_source(&high, 9, Some(serde_json::json!([6, 9])), &[]);
+    let out = dir.join("out.zip");
+
+    let error = merge(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    )
+    .expect_err("区间无交集必须失败");
+    assert!(
+        error.to_string().contains("无交集"),
+        "错误应说明格式区间无交集: {error}"
+    );
+    assert!(!out.exists(), "失败时不应留下输出文件");
+}
+
+#[test]
+fn zip_slip_entries_are_rejected() {
+    let dir = work("zip-slip");
+    let traversal = dir.join("traversal.zip");
+    write_source(&traversal, 46, None, &[("../evil.txt", b"boom".as_slice())]);
+    let error = merge(&request(vec![source("evil", &traversal, 0)]), &dir, &dir.join("a.zip"))
+        .expect_err("包含 .. 的条目必须拒绝");
+    assert!(error.to_string().contains(".."), "错误应指出 zip slip: {error}");
+
+    let absolute = dir.join("absolute.zip");
+    write_source(&absolute, 46, None, &[("/etc/passwd", b"boom".as_slice())]);
+    let error = merge(&request(vec![source("evil", &absolute, 0)]), &dir, &dir.join("b.zip"))
+        .expect_err("绝对路径条目必须拒绝");
+    assert!(
+        error.to_string().contains("绝对路径"),
+        "错误应指出绝对路径条目: {error}"
+    );
+}
+
+#[test]
+fn same_input_twice_produces_same_sha1() {
+    let dir = work("determinism");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    write_source(
+        &low,
+        46,
+        Some(serde_json::json!([40, 60])),
+        &[
+            ("assets/minecraft/texts/one.txt", b"one".as_slice()),
+            ("assets/minecraft/lang/zh_cn.json", r#"{"a":"1","b":"低"}"#.as_bytes()),
+        ],
+    );
+    write_source(
+        &high,
+        60,
+        Some(serde_json::json!([50, 90])),
+        &[
+            ("assets/minecraft/texts/two.txt", b"two".as_slice()),
+            ("assets/minecraft/lang/zh_cn.json", r#"{"b":"高","c":"3"}"#.as_bytes()),
+        ],
+    );
+    let request = request(vec![source("low", &low, 0), source("high", &high, 10)]);
+
+    let first_out = dir.join("first.zip");
+    let second_out = dir.join("second.zip");
+    let first = merge(&request, &dir, &first_out).expect("第一次合并");
+    let second = merge(&request, &dir, &second_out).expect("第二次合并");
+
+    assert_eq!(first.sha1, second.sha1, "同样输入两次必须得到相同 sha1");
+    assert_eq!(first.bytes, second.bytes);
+    assert_eq!(
+        std::fs::read(&first_out).expect("读第一次输出"),
+        std::fs::read(&second_out).expect("读第二次输出"),
+        "输出字节必须完全一致"
+    );
+}
+
+#[test]
+fn strict_policy_fails_on_path_conflict() {
+    let dir = work("strict");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/texts/conflict.txt";
+    write_source(&low, 46, None, &[(path, b"low".as_slice())]);
+    write_source(&high, 46, None, &[(path, b"high".as_slice())]);
+
+    let mut request = request(vec![source("low", &low, 0), source("high", &high, 10)]);
+    request.policy = Policy::Strict;
+    let error = merge(&request, &dir, &dir.join("out.zip")).expect_err("strict 必须失败");
+    assert!(
+        error.to_string().contains("strict"),
+        "错误应点名 strict 策略: {error}"
+    );
+}
+
+#[test]
+fn first_policy_keeps_lower_layer() {
+    let dir = work("first");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/texts/conflict.txt";
+    write_source(&low, 46, None, &[(path, b"low".as_slice())]);
+    write_source(&high, 46, None, &[(path, b"high".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let mut request = request(vec![source("low", &low, 0), source("high", &high, 10)]);
+    request.policy = Policy::First;
+    let (report, entries) = merge_ok(&request, &dir, &out);
+
+    assert_eq!(entry(&entries, path), Some(b"low".as_slice()), "first 策略低层胜");
+    assert_eq!(report.conflicts.len(), 1);
+    assert_eq!(report.conflicts[0].winner, "low");
+    assert_eq!(report.conflicts[0].losers, vec!["high".to_string()]);
+}
+
+#[test]
+fn pack_icon_comes_from_highest_layer() {
+    let dir = work("pack-icon");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    write_source(&low, 46, None, &[("pack.png", b"low-logo".as_slice())]);
+    write_source(&high, 46, None, &[("pack.png", b"high-logo".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let mut request = request(vec![source("low", &low, 0), source("high", &high, 10)]);
+    request.policy = Policy::First;
+    let (report, entries) = merge_ok(&request, &dir, &out);
+
+    assert_eq!(
+        entry(&entries, "pack.png"),
+        Some(b"high-logo".as_slice()),
+        "pack.png 固定取最高层，不受 policy 影响"
+    );
+    assert!(report.conflicts.is_empty(), "图标不算冲突");
+}
+
+#[test]
+fn requested_format_overrides_intersection_max() {
+    let dir = work("format-override");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    write_source(&low, 46, Some(serde_json::json!([46, 60])), &[]);
+    write_source(&high, 60, Some(serde_json::json!([50, 70])), &[]);
+    let out = dir.join("out.zip");
+
+    let mut request = request(vec![source("low", &low, 0), source("high", &high, 10)]);
+    request.format = 99;
+    let (report, entries) = merge_ok(&request, &dir, &out);
+
+    assert_eq!(report.format, 99);
+    assert_eq!((report.format_min, report.format_max), (50, 60));
+    let mcmeta: serde_json::Value =
+        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta")).unwrap();
+    assert_eq!(mcmeta["pack"]["pack_format"], 99);
+    assert_eq!(
+        mcmeta["pack"]["supported_formats"],
+        serde_json::json!([50, 60])
+    );
+}
+
+#[test]
+fn missing_mcmeta_is_tolerated() {
+    let dir = work("missing-mcmeta-tolerated");
+    let bare = dir.join("bare.zip");
+    write_zip(&bare, &[("assets/minecraft/texts/x.txt", b"x".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let mut request = request(vec![source("bare", &bare, 0)]);
+    request.format = 46;
+    let (report, entries) = merge_ok(&request, &dir, &out);
+
+    assert_eq!(report.format, 46);
+    assert_eq!((report.format_min, report.format_max), (46, 46));
+    assert_eq!(
+        entry(&entries, "assets/minecraft/texts/x.txt"),
+        Some(b"x".as_slice()),
+        "没有 pack.mcmeta 的来源，条目也要照常进入结果"
+    );
+    let mcmeta: serde_json::Value =
+        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出仍要有 pack.mcmeta"))
+            .expect("pack.mcmeta 是 JSON");
+    assert_eq!(mcmeta["pack"]["pack_format"], 46);
+    assert_eq!(
+        mcmeta["pack"]["supported_formats"],
+        serde_json::json!([46, 46])
+    );
+}
+
+#[test]
+fn missing_mcmeta_without_format_fails() {
+    let dir = work("missing-mcmeta-no-format");
+    let bare = dir.join("bare.zip");
+    write_zip(&bare, &[("assets/minecraft/texts/x.txt", b"x".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let error = merge(&request(vec![source("bare", &bare, 0)]), &dir, &out)
+        .expect_err("全部来源都没有 pack.mcmeta 且 format 为 0 时必须失败");
+    let message = error.to_string();
+    assert!(
+        message.contains("pack.mcmeta") && message.contains("format"),
+        "错误文案应同时点明 pack.mcmeta 与 format: {message}"
+    );
+    assert!(!out.exists(), "失败时不应留下输出文件");
+}
