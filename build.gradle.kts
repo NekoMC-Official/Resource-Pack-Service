@@ -25,7 +25,7 @@ dependencies {
 
     testImplementation("io.papermc.paper:paper-api:26.3.build.21-alpha")
     testImplementation("com.google.code.gson:gson:2.11.0")
-    testImplementation(platform("org.junit:junit-bom:5.11.4"))
+    testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
