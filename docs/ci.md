@@ -83,7 +83,7 @@ git push origin v0.1.0
 ## CodeQL（`codeql.yml`）
 
 - 触发：推送到 `main`、面向 `main` 的 PR、每周一 03:27 UTC 定时扫描、手动 `workflow_dispatch`。
-- 两个 job：`java-kotlin` 与 `rust`。Java/Kotlin 用 JDK 26 手动编译（`./gradlew compileJava compileKotlin --no-daemon`）；Rust 直接 `cargo build --release`。
+- 两个 job：`java-kotlin` 与 `rust`。Java/Kotlin 用 JDK 26 手动编译（`./gradlew compileJava compileKotlin --no-daemon`）；Rust 用 `build-mode: none`，由 CodeQL 自己解析依赖，编译验证交给 CI。
 - 权限：`contents: read`、`actions: read`、`security-events: write`，只把结果写入 Security → Code scanning。
 - 公开仓库的 CodeQL 免费；结果在仓库 Security 页与 PR 的检查项里看。
 - 首次扫描需要基础分支已启用 Code scanning；如果 Security 页没有结果，先确认这两个 job 是否成功，再检查默认分支设置。
