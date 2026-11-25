@@ -257,11 +257,6 @@ jobs:
           if [ -f build/pages/community-index.json ]; then
             ASSETS+=("build/pages/community-index.json")
           fi
-          for api in build/libs/resource-pack-service-api-*.jar; do
-            if [ -f "$api" ]; then
-              ASSETS+=("$api")
-            fi
-          done
           gh release create "$TAG" "${ASSETS[@]}" \
             --target "$TARGET" \
             --title "Resource Pack Service $VERSION" \

@@ -322,18 +322,17 @@ public final class PackListener implements Listener {
 `sha1` / `version` / `url` / `entryCount` / `bytes`，只替换 `error`。
 `PackStatusEvent` 不参与取消，描述的是客户端已经返回的回执。
 
-只依赖 API 的下游插件可以使用单独的 API jar，它只含 `moe.nekomc.resourcepack.api`
-下的接口、record 与事件，不含实现和 Kotlin 依赖：
+下游插件需要编译期依赖时，直接用插件 jar 即可：`moe.nekomc.resourcepack.api` 下的接口、
+record 与事件（`ResourcePackService`、`BuildResult`、`PackStatus`、`PackStatusEvent`、`PackSource`）
+都已经打进插件本体，不再单独发行 API jar。
 
 ```kotlin
 dependencies {
-    compileOnly(files("libs/resource-pack-service-api-0.1.6.jar"))
+    compileOnly(files("libs/resource-pack-service.jar"))
 }
 ```
 
-Release 页面与本插件 jar 同步提供 `resource-pack-service-api-<version>.jar`；
-坐标可记为 `moe.nekomc:resource-pack-service-api:<version>`（以 Release 附件形式分发，
-不是 Maven 仓库坐标）。
+Release 只提供这一个 jar：编译期当依赖，运行期放进服务端 `plugins/`，两者是同一个文件。
 
 ## 合并规则
 
@@ -453,8 +452,9 @@ community:
 
 产物：
 
-- `build/libs/resource-pack-service.jar`：可直接部署，内含当前平台的 `rps-pack`；
-- `build/libs/resource-pack-service-<version>-plain.jar`：不含依赖，仅供排查。
+- `build/libs/resource-pack-service.jar`：可直接部署，内含当前平台的 `rps-pack`。
+
+构建只产出这一个 jar：`moe.nekomc.resourcepack.api` 接口已打在本体内，下游插件编译期依赖与运行期部署用的是同一个文件，不再有独立的 api jar，也不再保留 plain jar。
 
 `rps-pack` 按构建机平台选一份塞进 jar（Windows / Linux / macOS × x86_64 / aarch64）。
 **在 Windows 上打的包内置的是 Windows 合并器，不能直接部署到 Linux 服务端**；

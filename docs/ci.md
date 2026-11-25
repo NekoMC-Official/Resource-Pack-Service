@@ -76,13 +76,13 @@ git push origin v0.1.0
 - 发行计划：`tools/packs.py plan` 以最近 `v*` 标签为基线，用 `git cat-file` 判断包在上个版本是否已存在，用 `git diff` 判断 `src`、`rust`、构建脚本等代码路径是否有变更。
 - 新包闸门：新增的 `release: auto` 包不会自动批准；维护者必须手动触发工作流，并在 `force_packs` 输入里点名一次。只新增包、没有代码变更时 `should_release=false`，后续构建与发布步骤全部跳过，不会创建版本。
 - 打包：只把 `approved-packs.txt` 里的包传给 `packs.py bundle --only`；未批准、未点名的包不会进入 `community-packs.zip`。如果批准集合的绑定关系不完整（例如 addon 缺同插件 official），工作流直接失败。
-- 包变更闸门：`plan` 额外输出 `packs_changed`（`force_packs` 点名、已批准包内容变更、新批准包，或上个标签里的包被删除/撤出时为 true）。为 false 时只发插件 jar 与 API jar，跳过 `community-packs.zip`、索引上传与 Pages 部署。
+- 包变更闸门：`plan` 额外输出 `packs_changed`（`force_packs` 点名、已批准包内容变更、新批准包，或上个标签里的包被删除/撤出时为 true）。为 false 时只发插件 jar，跳过 `community-packs.zip`、索引上传与 Pages 部署。
 - 版本闸门：已发行包的内容文件有改动时，`pack.yml` 的 `version` 必须严格大于上一个 `v*` 标签里的同 id 包；否则发行计划失败，避免内容变了但客户端与缓存仍认为是同一版。
 - 托管索引：同一个批准集合会传给 `packs.py index --only`，生成 `community-index.json` 与 `objects/<sha1>.zip`，上传为 Pages artifact 并部署到 `https://nekomc-official.github.io/Resource-Pack-Service/`。没有已批准包但发生撤包时，仍会生成空索引并部署，避免远程继续下载已撤下的包。未批准的包不会出现在索引里，因此不会因为合并进 `main` 就对外可用。
 - Pages：仓库的 Pages Source 必须设为 GitHub Actions；工作流需要 `pages: write` 与 `id-token: write`。
 - 服务端消费：把 `community.remote.enabled` 设为 `true`，插件会定时拉取索引，只下载本机已安装插件对应的包，全部下载与 sha1 校验通过后才整体切换 `manifest.json`，失败保留旧清单与旧包；`/rps community update` 可立即检查。离线部署仍可用 `community-packs.zip`。
 - 版本：取最近 `v*` 标签后补丁号加一；还没有标签时从 `v0.1.0` 开始。发行说明列出上次标签以来的提交与资源包报告。
-- 产物：Linux 版插件 jar 与 `resource-pack-service-api-<version>.jar`（只含 `moe.nekomc.resourcepack.api`）；有已批准资源包时再加 `community-packs.zip`、`pack-summary.md` 与 `community-index.json`；只有撤包时只更新索引，不生成 `community-packs.zip`。索引会部署到 Pages。
+- 产物：Linux 版插件 jar（内含 `moe.nekomc.resourcepack.api` 接口，供联动插件编译期依赖）；有已批准资源包时再加 `community-packs.zip`、`pack-summary.md` 与 `community-index.json`；只有撤包时只更新索引，不生成 `community-packs.zip`。索引会部署到 Pages。
 - 跳过：提交信息含 `[skip release]`，或提交者是 Dependabot。
 - 循环保护：机器人用 `GITHUB_TOKEN` 创建标签与 Release 不会再次触发工作流；手动推 `v*` 标签仍走原来的 `release.yml` 双平台矩阵。
 
