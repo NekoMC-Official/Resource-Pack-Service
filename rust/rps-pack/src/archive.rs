@@ -46,7 +46,14 @@ pub fn read_source(path: &Path, source_id: &str, read_total: &mut usize) -> Resu
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|error| {
+                MergeError::new(format!(
+                    "来源 {source_id} 第 {index} 个条目名称无效: {error}"
+                ))
+            })?
+            .to_string();
         validate_entry_name(&name)
             .map_err(|problem| MergeError::new(format!("来源 {source_id} 条目 {name} 不安全：{problem}")))?;
         let declared = entry.size();

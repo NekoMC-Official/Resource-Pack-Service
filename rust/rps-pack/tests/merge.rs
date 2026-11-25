@@ -82,7 +82,7 @@ fn read_zip(path: &Path) -> Vec<(String, Vec<u8>)> {
     let mut entries = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).expect("读取输出条目");
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buffer = Vec::new();
         entry.read_to_end(&mut buffer).expect("读取输出条目内容");
         entries.push((name, buffer));
@@ -96,7 +96,7 @@ fn read_timestamps(path: &Path) -> Vec<(String, Option<zip::DateTime>)> {
     let mut stamps = Vec::new();
     for index in 0..archive.len() {
         let entry = archive.by_index(index).expect("读取输出条目");
-        stamps.push((entry.name().to_string(), entry.last_modified()));
+        stamps.push((entry.name().unwrap().to_string(), entry.last_modified()));
     }
     stamps
 }
