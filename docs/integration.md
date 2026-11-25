@@ -153,7 +153,7 @@ sources:
 
   - id: "community/seasonal"
     enabled: true
-    path: "plugins/Resource Pack Service/community/seasonal.zip"
+    path: "plugins/ResourcePackService/community/seasonal.zip"
     priority: 10
 ```
 

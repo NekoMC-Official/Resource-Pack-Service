@@ -118,6 +118,24 @@ val stageRustBinary by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("dist/bin"))
 }
 
+val apiJar by tasks.registering(Jar::class) {
+    group = "build"
+    description = "只含 moe.nekomc.resourcepack.api 的轻量接口 jar，供联动插件编译期使用"
+    archiveBaseName.set("resource-pack-service-api")
+    archiveVersion.set(project.version.toString())
+    archiveClassifier.set("")
+    manifest {
+        attributes(
+            "Implementation-Title" to "Resource Pack Service API",
+            "Implementation-Version" to project.version.toString(),
+        )
+    }
+    from(sourceSets.main.get().output) {
+        include("moe/nekomc/resourcepack/api/**")
+    }
+}
+
 tasks.named("build") {
     dependsOn(stageRustBinary)
+    dependsOn(apiJar)
 }

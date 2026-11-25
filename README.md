@@ -39,7 +39,7 @@ zip，合并、版本、缓存、推送、回执全部由本服务统一处理�
 | 编排 | Kotlin 2.4.21（`jvmTarget = 25`） | 配置、注册表、发布器、监听、命令、文案 |
 | 计算 | Rust 2024（serde / serde_json / sha1 / zip） | `rps-pack` 只做合并，随 jar 内置 |
 | 构建 | Gradle 9.9.2 + Shadow 9.6.1 | 产出单个 `resource-pack-service.jar` |
-| 测试 | JUnit 6.1.3 / cargo test / unittest | Java 81 项，Rust 24 项（19 集成 + 5 单元），Python 27 项绑定测试 |
+| 测试 | JUnit 6.1.3 / cargo test / unittest | Java 92 项（19 个测试类），Rust 26 项（19 项合并集成 + 2 项 mcmeta + 5 项单元），Python 27 项绑定测试 |
 | 文本 | Adventure + MiniMessage | 提示语与 `push.notify-message` |
 
 依赖方向是单向的：**Java → Kotlin → Rust**。跨语言边界只传 JDK 类型和 Java record，
@@ -76,7 +76,7 @@ flowchart LR
 ## 安装
 
 1. 把 `resource-pack-service.jar` 放进服务端 `plugins/`。
-2. 启动一次，生成 `plugins/Resource Pack Service/config.yml`。
+2. 启动一次，生成 `plugins/ResourcePackService/config.yml`。从 0.1.6 起插件名改为无空格的 `ResourcePackService`（Paper 26.x 拒绝带空格的描述符）；首次启动会把旧目录 `plugins/Resource Pack Service` 的内容自动迁移过来。
 3. 按需改下载出口与来源，然后 **COLD 重启**（Bukkit 插件不支持热装）。
 4. 确认 `server.properties` 里这两项为空：
 
@@ -124,7 +124,7 @@ sources:
 
 community:
   enabled: true
-  dir: "plugins/Resource Pack Service/community"
+  dir: "plugins/ResourcePackService/community"
   priority: 0
   remote:
     enabled: true
@@ -147,8 +147,10 @@ community:
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `provider.required` | `false` | `true` 时客户端拒绝资源包会被断开 |
+| `provider.required` | `false` | **服务端**强制策略：`true` 时玩家拒绝资源包会被按 `reject-message` 断开。它不改变客户端弹什么框——弹不弹由玩家在该服务器条目的「Server Resource Packs」（提示 / 已启用 / 已禁用）决定 |
+| `provider.announce-required` | 跟随 `required` | 是否把“必需”标记随包发给客户端。`true`：即使档位为「已禁用」也会弹必装框（Proceed / Disconnect），拒绝时客户端先用它自己的文案断开；`false`：一律可选（Yes/No），拒绝后由 `required` 决定是否断开 |
 | `provider.prompt` | 空 | 下载界面显示的一句提示 |
+| `provider.reject-message` | 内置文案 | `required` / `announce-required` 生效且客户端拒绝时的断开原因，MiniMessage；留空使用内置自解释文案（`announce-required: true` 时客户端会先自己断开，本文案只作服务端兜底） |
 | `merge.policy` | `override` | 路径冲突策略：`override` / `strict` / `first` |
 | `merge.rust.binary` | `bin/rps-pack` | 合并器路径；留空或不存在时用 jar 内置的那份 |
 | `merge.rust.timeout-ms` | `60000` | 单次合并超时，最小 5000 |
@@ -158,7 +160,7 @@ community:
 | `merge.description` | `NekoMC 统一资源包` | 写进 `pack.mcmeta` 的 description |
 | `output.dir` | `merged` | 相对插件数据目录，存放 `merged.zip` 与条目清单 |
 | `community.enabled` | `true` | 是否加载社区资源包目录 |
-| `community.dir` | `plugins/Resource Pack Service/community` | 社区包目录，内含 `manifest.json` 与各包 zip |
+| `community.dir` | `plugins/ResourcePackService/community` | 社区包目录，内含 `manifest.json` 与各包 zip |
 | `community.priority` | `0` | 社区包的层序偏移，叠加在各包自己的 `priority` 上 |
 | `community.minecraft` | 空 | 服务端 Minecraft 版本；空表示不额外限制，由各包的 `minecraft` 范围决定 |
 | `community.pack-format` | 跟随 `merge.pack-format` | 服务端资源包格式。留空时若 `merge.pack-format` 是具体数字就沿用，否则为 `0`；`0` 表示不按格式过滤，交给合成阶段取各包格式范围的交集 |
@@ -184,6 +186,21 @@ community:
 `push.mode` 只影响**内容真的变化**的那一次构建。相同内容重复构建会跳过重推，
 避免玩家白白重下整包。
 
+### `provider.required` 的作用范围
+
+`provider.required` 是**全局开关**：对所有来源、所有玩家、所有推送路径（进服、内容变化通知、
+`/rps push`、API `push`）一起生效，与是哪个插件登记了来源无关，也不存在“只对某个包必装”的配置。
+
+| `push.mode` | 构建后发现内容变化 | 与 `required` 的关系 |
+| --- | --- | --- |
+| `none` | 只落盘，不通知也不重推 | 玩家下次进服仍会推送，`needed` 由 `required` 决定 |
+| `notify` | 给在线玩家发 `push.notify-message`，玩家自己点提示重载 | 同上 |
+| `force` | 立刻对所有在线玩家重推（内容未变也推） | 只表示“立即重推”；不会把包标成必需（推送时客户端的 `required` 恒为 `false`），必需性由服务端在收到 `DECLINED` 后按 `provider.required` 执行 |
+
+`required: false` 时，玩家拒绝后只是记录 `DECLINED`，**下次进服仍会再推一次**（服务端不保存
+“永不再推”的标记）；`required: true` 时拒绝会在玩家实体调度器上按 `provider.reject-message` 断开，
+下次进服同样会再推。
+
 ## 命令与权限
 
 | 命令 | 作用 | 权限 |
@@ -198,6 +215,7 @@ community:
 | `/rps check` | 检查下载地址、`server.properties`、其它插件的疑似推送配置 | `rps.check` |
 | `/rps diff` | 对比本次与上次的条目差异 | `rps.diff` |
 | `/rps conflicts` | 看材质、模型、方块状态等冲突；`all` 查看语言、声音、字体、图集 | `rps.use` |
+| `/rps rejected [条数]` | 最近的玩家资源包状态（谁、何时、状态、sha1 前 8 位） | `rps.status` |
 | `/rps community` | 查看社区目录、已纳入数量与远程索引状态 | `rps.community` |
 | `/rps community update` | 立即拉取一次远程索引并按需下载 | `rps.community` |
 
@@ -219,6 +237,7 @@ public interface PackSource {
     default boolean enabled() { return true; }
     default String sha1() { return null; }          // null 表示由服务计算
     default java.util.List<String> namespaces() { return java.util.List.of(); }
+    default String version() { return ""; }         // 仅用于展示，不参与合并顺序
 }
 ```
 
@@ -255,6 +274,67 @@ service.register(source);
 
 不写代码的接入方式、目录打包、远程 URL、冲突处理，见 [docs/integration.md](docs/integration.md)。
 
+### 运行时状态、构建结果与事件（0.1.6+）
+
+这组接口只增不改，旧实现类不需要改动即可编译。异步方法叫 `rebuildAsync`，因为 Java
+不能只按返回类型重载已有的 `rebuild(boolean)`。
+
+```java
+ResourcePackService service = getServer().getServicesManager()
+        .load(ResourcePackService.class);
+
+// 发起重建并等待结果；同一时刻只跑一次，重复请求会合并到下一轮。
+BuildResult built = service.rebuildAsync(true).join();
+if (built.ok()) {
+    getLogger().info("包已更新: " + built.sha1() + " v" + built.version()
+            + " (" + built.entryCount() + " 项, " + built.bytes() + " 字节)");
+} else {
+    getLogger().warning("构建失败: " + built.error());
+}
+
+// 当前快照：sha1 与客户端实际下载的 merged.zip 逐字节一致，url 可直接 GET。
+BuildResult current = service.snapshot();
+String lastError = service.lastError();          // 成功时为 null
+
+// 每个玩家的状态；未知或已离线玩家返回 UNKNOWN，不会返回 null。
+UUID id = player.getUniqueId();
+PackStatus status = service.status(id);           // UNKNOWN/PENDING/LOADED/DECLINED/FAILED/INVALID_URL
+String loadedSha1 = service.hashOf(id);           // 加载成功时用的 sha1，否则 null
+```
+
+监听状态变化：
+
+```java
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import moe.nekomc.resourcepack.api.PackStatusEvent;
+
+public final class PackListener implements Listener {
+    @EventHandler
+    public void onPackStatus(PackStatusEvent event) {
+        // 事件在该玩家的 Folia 实体调度器上触发；这里只做轻量记录。
+        getLogger().info(event.playerId() + " -> " + event.status());
+    }
+}
+```
+
+`BuildResult` 的 `error` 为 `null` 表示成功；失败时保留上一次成功构建的
+`sha1` / `version` / `url` / `entryCount` / `bytes`，只替换 `error`。
+`PackStatusEvent` 不参与取消，描述的是客户端已经返回的回执。
+
+只依赖 API 的下游插件可以使用单独的 API jar，它只含 `moe.nekomc.resourcepack.api`
+下的接口、record 与事件，不含实现和 Kotlin 依赖：
+
+```kotlin
+dependencies {
+    compileOnly(files("libs/resource-pack-service-api-0.1.6.jar"))
+}
+```
+
+Release 页面与本插件 jar 同步提供 `resource-pack-service-api-<version>.jar`；
+坐标可记为 `moe.nekomc:resource-pack-service-api:<version>`（以 Release 附件形式分发，
+不是 Maven 仓库坐标）。
+
 ## 合并规则
 
 1. 来源按 `priority` 升序排列，低优先级先入层，高优先级后入层。
@@ -279,7 +359,7 @@ Minecraft 原版协议没有资源包增量下载：客户端只会对整包发�
 3. **压体积**：合并时去重、压缩纹理、删掉未引用的文件。
 
 `/rps conflicts` 默认只列材质、模型、方块状态等会直接影响外观的冲突，`/rps conflicts all`
-再看语言、声音、字体与图集；完整明细落在 `plugins/Resource Pack Service/conflicts.json`。
+再看语言、声音、字体与图集；完整明细落在 `plugins/ResourcePackService/conflicts.json`。
 `/rps diff` 给出条目级变化，用来判断这次改动是否值得让全服重下；`merge.max-bytes`
 防止误把大文件塞进来。真正的增量只能靠客户端 mod，服务端插件做不到。
 
@@ -334,7 +414,7 @@ packs/
 - 离线使用：从 Release 下载 `community-packs.zip`，解压到插件数据目录下的 `community/`：
 
 ```text
-plugins/Resource Pack Service/community/
+plugins/ResourcePackService/community/
 ├── manifest.json
 ├── companion-base.zip
 ├── bettermodel-base.zip
@@ -352,7 +432,7 @@ plugins/Resource Pack Service/community/
 ```yaml
 community:
   enabled: true
-  dir: "plugins/Resource Pack Service/community"
+  dir: "plugins/ResourcePackService/community"
   priority: 0
   remote:
     enabled: true
@@ -412,7 +492,7 @@ packs/                             社区资源包
 ## 当前状态
 
 - 合成、内置 HTTP、进服推送、回执、权限、体检、社区资源包流水线均已落地。
-- Java 81 项测试、Rust 24 项（19 集成 + 5 单元）、Python 27 项绑定测试；`./gradlew build`、`cargo test` 与 `python -m unittest discover -s tools` 通过。
+- Java 92 项测试（19 个测试类）、Rust 26 项（19 项合并集成 + 2 项 mcmeta + 5 项单元）、Python 27 项绑定测试；`./gradlew build`、`cargo test` 与 `python -m unittest discover -s tools` 通过。
 - 尚未做真实 Folia 服务端的端到端联调；首次部署建议在 preflight 副本上验证
   `/rps status`、进服推送与拒绝回执。
 

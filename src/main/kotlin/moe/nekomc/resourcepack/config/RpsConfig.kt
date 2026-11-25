@@ -13,7 +13,9 @@ import org.bukkit.configuration.file.FileConfiguration
  */
 class RpsConfig private constructor(
     private val requiredFlag: Boolean,
+    private val announceRequiredFlag: Boolean,
     private val promptText: String,
+    private val rejectText: String,
     private val policyName: String,
     private val jsonMergeEnabled: Boolean,
     private val formatOverride: Int,
@@ -49,8 +51,14 @@ class RpsConfig private constructor(
     /** 资源包是否必装：客户端拒绝时断开。 */
     fun required(): Boolean = requiredFlag
 
+    /** 是否把“必需”标记发给客户端；未配置 provider.announce-required 时跟随 provider.required。 */
+    fun announceRequired(): Boolean = announceRequiredFlag
+
     /** 推送给客户端时显示的提示语。 */
     fun prompt(): String = promptText
+
+    /** 客户端拒绝必装资源包时显示的断开原因。 */
+    fun rejectMessage(): String = rejectText
 
     /** 合并冲突策略，交给 rps-pack。 */
     fun policy(): String = policyName
@@ -145,6 +153,9 @@ class RpsConfig private constructor(
         private const val DEFAULT_NOTIFY =
             "<click:run_command:'/rps push'><gray>资源包已更新，<white><u>点这里</u><gray>立即重载</click>"
 
+        private const val DEFAULT_REJECT =
+            "<red>本服资源包为必装项。请重新进入并在提示中点「是」，或在 选项 → 资源包 中把服务器资源包设为「已启用」。"
+
         /** 从 config.yml 读一份快照；相对路径按 serverRoot 解析。 */
         @JvmStatic
         fun load(config: FileConfiguration, serverRoot: Path): RpsConfig {
@@ -179,7 +190,7 @@ class RpsConfig private constructor(
             }
 
             val format = parseFormat(config.getString("merge.pack-format", "auto"))
-            val communityDir = root.resolve(config.getString("community.dir", "plugins/Resource Pack Service/community") ?: "community").normalize()
+            val communityDir = root.resolve(config.getString("community.dir", "plugins/ResourcePackService/community") ?: "community").normalize()
             val communityMinecraft = (config.getString("community.minecraft", "") ?: "").trim()
             val communityPackFormatValue = config.get("community.pack-format")?.toString()?.trim().orEmpty()
             // 缺省时沿用 merge.pack-format 的具体数字；merge.pack-format 为 auto 时 format 已是 0，即不按格式过滤
@@ -192,9 +203,16 @@ class RpsConfig private constructor(
         val communityRemoteMaxPack = config.getLong("community.remote.max-pack-bytes", 67_108_864L).coerceAtLeast(1L)
             val interval = config.getLong("watch.interval-seconds", 60L)
 
+            val requiredFlagValue = config.getBoolean("provider.required", false)
+            val announceRequiredValue =
+                if (config.isSet("provider.announce-required")) config.getBoolean("provider.announce-required")
+                else requiredFlagValue
+
             return RpsConfig(
-                requiredFlag = config.getBoolean("provider.required", false),
+                requiredFlag = requiredFlagValue,
+                announceRequiredFlag = announceRequiredValue,
                 promptText = config.getString("provider.prompt", "") ?: "",
+                rejectText = config.getString("provider.reject-message", DEFAULT_REJECT) ?: DEFAULT_REJECT,
                 policyName = config.getString("merge.policy", "override") ?: "override",
                 jsonMergeEnabled = config.getBoolean("merge.json-merge", true),
                 formatOverride = format,

@@ -1,6 +1,9 @@
 package moe.nekomc.resourcepack.command
 
 import java.nio.charset.StandardCharsets
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
@@ -22,7 +25,11 @@ import org.bukkit.entity.Player
  */
 class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompleter {
 
-    private val subcommands = listOf("status", "list", "build", "reload", "push", "check", "diff", "conflicts", "community")
+    private val subcommands =
+        listOf("status", "list", "build", "reload", "push", "check", "diff", "conflicts", "rejected", "community")
+
+    private val statusTime: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("MM-dd HH:mm:ss").withZone(ZoneId.systemDefault())
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<String>): Boolean {
         if (!sender.hasPermission("rps.use")) {
@@ -52,6 +59,7 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
             "check" -> check(sender)
             "diff" -> diff(sender)
             "conflicts" -> conflicts(sender, args)
+            "rejected" -> rejected(sender, args)
             "community" -> community(sender, args)
             else -> help(sender)
         }
@@ -348,6 +356,35 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
         }
     }
 
+    private fun rejected(sender: CommandSender, args: Array<String>) {
+        val delivery = plugin.delivery()
+        if (delivery == null) {
+            sender.sendMessage(render(PackMessages.error("下发器还没就绪，等一下再试")))
+            return
+        }
+        val requested = args.getOrNull(1)?.toIntOrNull() ?: 20
+        val limit = requested.coerceIn(1, 200)
+        val entries = delivery.recent(limit)
+        if (entries.isEmpty()) {
+            sender.sendMessage(render(PackMessages.warn("还没有记录到玩家资源包状态")))
+            return
+        }
+        sender.sendMessage(render(PackMessages.info("最近 " + entries.size + " 条资源包状态")))
+        for (entry in entries) {
+            val name = entry.playerName().ifBlank { entry.playerId().toString() }
+            val hash = if (entry.sha1().isBlank()) "" else " · " + entry.sha1().take(8)
+            sender.sendMessage(
+                render(
+                    PackMessages.field(
+                        safe(name) + " · " + entry.status().name,
+                        statusTime.format(Instant.ofEpochMilli(entry.at())) + hash,
+                    ),
+                ),
+            )
+        }
+        sender.sendMessage(render("<gray>状态来自客户端反馈；DECLINED 表示玩家拒绝了资源包"))
+    }
+
     private fun community(sender: CommandSender, args: Array<String>) {
         val config = plugin.config()
         sender.sendMessage(render(PackMessages.info("社区资源包远程索引")))
@@ -381,6 +418,7 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
             "check" to "检查地址、端口与配置冲突",
             "diff" to "对比本次与上次的条目差异",
             "conflicts" to "看材质、模型等资源冲突；all 查看全部",
+            "rejected" to "看最近的玩家资源包状态；可带条数",
             "community" to "社区包远程索引；update 立即检查"
         )
         for ((sub, description) in entries) {
@@ -396,6 +434,9 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
         }
         if (sub == "conflicts") {
             return true
+        }
+        if (sub == "rejected") {
+            return sender.hasPermission("rps.status") || sender.hasPermission("rps.admin")
         }
         return sub == "help" || sender.hasPermission("rps." + sub) || sender.hasPermission("rps.admin")
     }
@@ -420,6 +461,9 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
     override fun onTabComplete(sender: CommandSender, command: Command, alias: String, args: Array<String>): List<String> {
         if (args.size == 1) {
             return subcommands.filter { canUseSub(sender, it) }
+        }
+        if (args.size == 2 && args[0].equals("rejected", ignoreCase = true)) {
+            return listOf("20", "50", "100")
         }
         if (args.size == 2 && args[0].equals("conflicts", ignoreCase = true)) {
             return listOf("all")

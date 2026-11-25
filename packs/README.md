@@ -122,7 +122,7 @@ Auto Release 还会把已批准的资源包索引发布到 GitHub Pages：`https
 ```yaml
 community:
   enabled: true
-  dir: "plugins/Resource Pack Service/community"
+  dir: "plugins/ResourcePackService/community"
   priority: 0
   remote:
     enabled: false

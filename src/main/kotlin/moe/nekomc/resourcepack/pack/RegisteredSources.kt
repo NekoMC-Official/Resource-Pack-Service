@@ -1,9 +1,12 @@
 package moe.nekomc.resourcepack.pack
 
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.function.Supplier
+import moe.nekomc.resourcepack.api.BuildResult
 import moe.nekomc.resourcepack.api.PackSource
+import moe.nekomc.resourcepack.api.PackStatus
 import moe.nekomc.resourcepack.api.ResourcePackService
 import moe.nekomc.resourcepack.core.SourceRegistry
 import moe.nekomc.resourcepack.core.ZipSource
@@ -64,6 +67,16 @@ class RegisteredSources(
     override fun rebuild(announce: Boolean) {
         host.rebuild(announce)
     }
+
+    override fun rebuildAsync(announce: Boolean): CompletableFuture<BuildResult> = host.rebuildAsync(announce)
+
+    override fun snapshot(): BuildResult = host.snapshot()
+
+    override fun status(player: UUID?): PackStatus = if (player == null) PackStatus.UNKNOWN else host.status(player)
+
+    override fun hashOf(player: UUID?): String? = if (player == null) null else host.hashOf(player)
+
+    override fun lastError(): String? = host.lastError()
 
     override fun push(player: UUID?, force: Boolean): Int {
         if (player == null) {

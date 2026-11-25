@@ -8,10 +8,13 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import java.util.function.Consumer
+import moe.nekomc.resourcepack.api.BuildResult
 import moe.nekomc.resourcepack.core.Hashing
 import moe.nekomc.resourcepack.core.ZipSource
 import moe.nekomc.resourcepack.merge.MergeResult
@@ -32,12 +35,20 @@ class PackPublisher(private val plugin: PackHost) {
     private val running = AtomicBoolean(false)
     private val pending = AtomicBoolean(false)
     private val pendingAnnounce = AtomicBoolean(false)
+    private val waiters = ConcurrentLinkedQueue<CompletableFuture<BuildResult>>()
     private val community = java.util.concurrent.atomic.AtomicReference<List<ZipSource>>(emptyList())
 
     /** 本实例是否仍然有效；reload / onDisable 会把旧实例作废，在途构建据此放弃结果。 */
     private val active = AtomicBoolean(true)
 
     fun snapshot(): PackSnapshot = current.get()
+
+    /** 当前构建结果；失败时保留上一版字段并带 error。 */
+    fun buildResult(): BuildResult {
+        val value = current.get()
+        val ok = value.version() > 0 && value.url().isNotBlank() && value.error().isBlank()
+        return BuildResult(ok, value.sha1(), value.version().toLong(), value.url(), value.entries(), value.bytes(), value.error().ifBlank { null })
+    }
 
     /** 社区包按插件绑定筛选后的来源；由插件入口在启动/重载/插件启停时刷新。 */
     fun setCommunitySources(sources: List<ZipSource>): Boolean {
@@ -66,9 +77,21 @@ class PackPublisher(private val plugin: PackHost) {
 
     fun building(): Boolean = running.get()
 
+    /** 发起构建并等待本轮（或合并后的下一轮）结果。 */
+    fun rebuildAsync(announce: Boolean): CompletableFuture<BuildResult> {
+        if (!active.get()) {
+            return CompletableFuture.completedFuture(BuildResult.unavailable("发布器已被替换"))
+        }
+        val waiter = CompletableFuture<BuildResult>()
+        waiters.add(waiter)
+        rebuild(announce)
+        return waiter
+    }
+
     /** 作废本实例：在途构建发现 active 为 false 后不再落盘，也不再覆盖对外快照。 */
     fun supersede() {
         active.set(false)
+        completeWaiters(BuildResult.unavailable("发布器已被替换"))
     }
 
     /** 合并实现的名字，用于状态展示。 */
@@ -170,12 +193,13 @@ class PackPublisher(private val plugin: PackHost) {
             } else {
                 withVersion(base, version)
             }
-            current.set(PackSnapshot(url, sha1, version, result.bytes(), builtAt, result.summary(), ""))
+            current.set(PackSnapshot(url, sha1, version, result.bytes(), result.entries(), builtAt, result.summary(), ""))
             try {
                 ConflictReport.write(outputDir, current.get(), result)
             } catch (exception: Exception) {
                 plugin.logger().warning("写入冲突报告失败：" + (exception.message ?: exception.javaClass.simpleName))
             }
+            completeWaiters(buildResult())
             if (delivery == null) {
                 plugin.logger().warning("下发器还没有就绪，本次合成结果不会自动推送")
             } else {
@@ -228,12 +252,15 @@ class PackPublisher(private val plugin: PackHost) {
         val previous = current.get()
         val detail = error.message ?: error.javaClass.simpleName
         plugin.logger().severe("合成失败：" + detail)
-        current.set(
-            PackSnapshot(
-                previous.url(), previous.sha1(), previous.version(),
-                previous.bytes(), previous.builtAt(), previous.summary(), detail
-            )
-        )
+        current.set(previous.failed(detail))
+        completeWaiters(buildResult())
+    }
+
+    private fun completeWaiters(result: BuildResult) {
+        while (true) {
+            val waiter = waiters.poll() ?: return
+            waiter.complete(result)
+        }
     }
 
     private fun merger(): Merger =

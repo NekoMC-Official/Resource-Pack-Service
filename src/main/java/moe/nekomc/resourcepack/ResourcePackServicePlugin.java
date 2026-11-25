@@ -1,17 +1,24 @@
 package moe.nekomc.resourcepack;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.net.URI;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
+import moe.nekomc.resourcepack.api.BuildResult;
 import moe.nekomc.resourcepack.api.PackSource;
+import moe.nekomc.resourcepack.api.PackStatus;
 import moe.nekomc.resourcepack.api.ResourcePackService;
 import moe.nekomc.resourcepack.command.RpsCommand;
 import moe.nekomc.resourcepack.command.RpsCommandHost;
@@ -65,6 +72,7 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
 
     @Override
     public void onEnable() {
+        migrateLegacyDataFolder();
         saveDefaultConfig();
         registeredSources = new RegisteredSources(this::currentRegistry, new Host() {
             @Override
@@ -83,6 +91,39 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
                 }
                 PackSnapshot snapshot = current.snapshot();
                 return new HostStatus(snapshot.version(), snapshot.url(), snapshot.sha1());
+            }
+
+            @Override
+            public CompletableFuture<BuildResult> rebuildAsync(boolean announce) {
+                PackPublisher current = publisher;
+                if (current == null) {
+                    return CompletableFuture.completedFuture(BuildResult.unavailable("发布器尚未就绪"));
+                }
+                return current.rebuildAsync(announce);
+            }
+
+            @Override
+            public BuildResult snapshot() {
+                PackPublisher current = publisher;
+                return current == null ? BuildResult.unavailable("发布器尚未就绪") : current.buildResult();
+            }
+
+            @Override
+            public PackStatus status(UUID player) {
+                PackPusher current = delivery;
+                return current == null ? PackStatus.UNKNOWN : current.status(player);
+            }
+
+            @Override
+            public String hashOf(UUID player) {
+                PackPusher current = delivery;
+                return current == null ? null : current.hashOf(player);
+            }
+
+            @Override
+            public String lastError() {
+                PackPublisher current = publisher;
+                return current == null ? null : current.buildResult().error();
             }
 
             @Override
@@ -189,7 +230,9 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
                 config.deliveryJoinDelayTicks(),
                 config.deliveryStatusFeedback(),
                 config.required(),
-                config.prompt());
+                config.announceRequired(),
+                config.prompt(),
+                config.rejectMessage());
         delivery = pusher;
         getServer().getPluginManager().registerEvents(pusher, this);
     }
@@ -566,5 +609,57 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
 
     public RegisteredSources registeredSources() {
         return registeredSources;
+    }
+
+    /**
+     * 早期版本的插件名带空格，Paper 26.x 会拒绝加载这种描述符。改名后数据目录会从
+     * {@code plugins/Resource Pack Service} 变成 {@code plugins/ResourcePackService}；
+     * 这里在首次启用时把旧目录内容搬过去，避免升级后配置与社区包凭空消失。
+     */
+    private void migrateLegacyDataFolder() {
+        File current = getDataFolder();
+        File parent = current.getParentFile();
+        if (parent == null) {
+            return;
+        }
+        File legacy = new File(parent, "Resource Pack Service");
+        if (!legacy.isDirectory() || legacy.equals(current)) {
+            return;
+        }
+        if (new File(current, "config.yml").isFile()) {
+            return;
+        }
+        try {
+            Files.createDirectories(current.toPath());
+            moveChildren(legacy.toPath(), current.toPath());
+            getLogger().info("已将旧数据目录迁移到 " + current.getName());
+        } catch (IOException e) {
+            getLogger().warning("迁移旧数据目录失败：" + e.getMessage());
+        }
+    }
+
+    private static void moveChildren(Path from, Path to) throws IOException {
+        List<Path> children;
+        try (Stream<Path> stream = Files.list(from)) {
+            children = stream.toList();
+        }
+        for (Path child : children) {
+            Path target = to.resolve(child.getFileName().toString());
+            if (Files.isDirectory(child)) {
+                Files.createDirectories(target);
+                moveChildren(child, target);
+                try {
+                    Files.deleteIfExists(child);
+                } catch (IOException ignored) {
+                    // 旧目录残留不影响新目录使用。
+                }
+                continue;
+            }
+            try {
+                Files.move(child, target, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException moveFailed) {
+                Files.copy(child, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-name: Resource Pack Service
+name: ResourcePackService
 version: '${version}'
 main: moe.nekomc.resourcepack.ResourcePackServicePlugin
 api-version: '26.3'

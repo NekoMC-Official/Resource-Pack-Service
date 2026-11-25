@@ -809,7 +809,7 @@ def cmd_bundle(args):
         "",
         "## 使用",
         "",
-        "把 community-packs.zip 解压到服务端的 plugins/Resource Pack Service/community/，",
+        "把 community-packs.zip 解压到服务端的 plugins/ResourcePackService/community/，",
         "然后执行 /rps reload。目录里必须有 manifest.json，每个包是独立的 <id>.zip。",
         "",
         "新增资源包不会因为这次构建自动发行；维护者确认后，用 Auto Release 工作流的",

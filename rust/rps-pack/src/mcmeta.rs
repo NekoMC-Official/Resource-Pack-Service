@@ -10,6 +10,12 @@ pub fn interval(mcmeta: &Value, source_id: &str) -> Result<(i64, i64)> {
         Some(pack) => pack,
         None => return err(format!("来源 {source_id} 的 pack.mcmeta 缺少 pack 对象")),
     };
+    if let (Some(min), Some(max)) = (
+        pack.get("min_format").and_then(parse_format),
+        pack.get("max_format").and_then(parse_format),
+    ) {
+        return Ok((min.min(max), min.max(max)));
+    }
     if let Some(supported) = pack.get("supported_formats") {
         return match parse_supported(supported) {
             Some(range) => Ok(range),
@@ -23,6 +29,14 @@ pub fn interval(mcmeta: &Value, source_id: &str) -> Result<(i64, i64)> {
         None => err(format!(
             "来源 {source_id} 的 pack.mcmeta 同时缺少 pack_format 与 supported_formats"
         )),
+    }
+}
+
+fn parse_format(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
     }
 }
 

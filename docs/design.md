@@ -70,7 +70,7 @@ Rust（计算）
 
 ## 3. 对外标准 API
 
-包名 `moe.nekomc.resourcepack.api`，只有 JDK 类型：
+包名 `moe.nekomc.resourcepack.api`。除事件必须继承 Bukkit 的 `Event` 外，只使用 JDK 类型；不暴露 Kotlin 类型或默认参数：
 
 ```java
 public interface PackSource {
@@ -93,6 +93,23 @@ public interface ResourcePackService {
     void rebuild(boolean announce);
     int push(UUID player, boolean force);
     void invalidate(String id);
+
+    // 0.1.6+，全部带 default 实现
+    CompletableFuture<BuildResult> rebuildAsync(boolean announce);
+    BuildResult snapshot();
+    PackStatus status(UUID player);
+    String hashOf(UUID player);
+    String lastError();
+}
+
+public record BuildResult(
+        boolean ok, String sha1, long version, String url,
+        int entryCount, long bytes, String error) {}
+
+public enum PackStatus { UNKNOWN, PENDING, LOADED, DECLINED, FAILED, INVALID_URL }
+
+public final class PackStatusEvent extends Event {
+    UUID playerId(); PackStatus status(); String sha1();
 }
 ```
 
@@ -115,6 +132,11 @@ ResourcePackService service = Bukkit.getServicesManager().load(ResourcePackServi
 | `push` | 只对在线玩家生效，返回排程数量；不等待客户端回执 |
 | `invalidate` | 来源 id 为空或未登记时无操作；否则触发一次异步重建，用于插件重写了本地 zip |
 | 配置来源与 API 来源同 id | API 来源覆盖配置来源 |
+| `rebuildAsync` | Java 不能只按返回类型重载 `rebuild(boolean)`，异步版另起名；同刻只跑一次，重复请求合并到下一轮，future 在该轮结束时完成 |
+| `snapshot` | `sha1` 与客户端实际下载的 `merged.zip` 逐字节一致，`url` 是带版本参数的完整可 GET 地址；失败时保留上一次成功字段并带 `error` |
+| `status` / `hashOf` | 未知或已离线玩家返回 `UNKNOWN` / `null`，不返回 null 状态；数据与 `/rps rejected` 共用同一份内存表 |
+| `lastError` | 最近一次构建失败原因；成功或尚未构建为 `null` |
+| `PackStatusEvent` | 在该玩家的 Folia 实体调度器触发，不参与取消；客户端回执已经发生后才发 |
 
 API 来源在 `/rps reload` 后由 `RegisteredSources.reapply` 重新投回新注册表，
 不需要插件重新注册。
@@ -238,6 +260,10 @@ registry.ordered()
 - sha1 为空时使用 3 参重载，非空时使用带 sha1 的 4 参版本；
 - 监听 `PlayerResourcePackStatusEvent`，记录加载成功、拒绝、下载失败、无效地址；
 - `provider.required=true` 且客户端拒绝时，在玩家调度器上断开；
+- 是否把“必需”标记随包发出去由 `provider.announce-required` 决定（未配置时跟随 `required`）：
+  取 `true` 时 `PackPusher` 把 `needed=true` 传给 `setResourcePack`，客户端即使档位为「已禁用」
+  也会弹必装框（Proceed / Disconnect），拒绝时客户端会先用自己的文案断开、`reject-message` 只作兜底；
+  取 `false` 时客户端一律当可选包，客户端弹窗文案始终是“建议/可选”；
 - 内容变化后：`none` 不动作，`notify` 发可点击提示，`force` 直接重推所有在线玩家。
 
 客户端只保留最后收到的包；同一时刻只允许本插件推送，是部署前提。
@@ -272,8 +298,8 @@ registry.ordered()
 
 ## 10. 测试
 
-- Java：`./gradlew test`，81 项，覆盖 API 注册表与 invalidate、社区包选择与版本范围、索引解析、远程更新与校验、URL 拼接、HTTP 出口、内置二进制解出、Rust 合并器集成、冲突报告、条目清单、插件描述符、配置体检扫描等。
-- Rust：`cd rust/rps-pack && cargo test`，24 项（19 项集成 + 5 项单元），覆盖层序、冲突策略、
+- Java：`./gradlew test`，92 项（19 个测试类），覆盖 API 注册表与 invalidate、社区包选择与版本范围、索引解析、远程更新与校验、URL 拼接、HTTP 出口、内置二进制解出、Rust 合并器集成、冲突报告、条目清单、插件描述符、配置体检扫描等。
+- Rust：`cd rust/rps-pack && cargo test`，26 项（19 项合并集成 + 2 项 mcmeta + 5 项单元），覆盖层序、冲突策略、
   JSON 深合并、mcmeta 交集、确定性、zip slip、缺失 mcmeta、冲突分类与指纹等。
 - Python：`python -m unittest discover -s tools`，27 项，覆盖 official 变体默认、addon/patch 依赖、integration 多插件闭合、release=none、优先级排序、version / minecraft / format 范围解析、索引生成，以及内容变更但 version 未递增时发行计划失败的闸门。
 - CI 在 Ubuntu 上跑 `python -m unittest discover -s tools`、`cargo test` 与 `./gradlew build`，并把合并器路径通过

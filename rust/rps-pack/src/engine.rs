@@ -208,13 +208,21 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         return err("无法确定 pack_format：交集最大值为 0，请在请求里显式指定 format");
     }
 
-    let built = serde_json::json!({
-        "pack": {
-            "pack_format": format,
-            "supported_formats": [format_min, format_max],
-            "description": request.description,
-        }
-    });
+    let mut pack = serde_json::Map::new();
+    pack.insert("pack_format".to_string(), serde_json::json!(format));
+    pack.insert("min_format".to_string(), serde_json::json!(format_min));
+    pack.insert("max_format".to_string(), serde_json::json!(format_max));
+    if format < 65 {
+        pack.insert(
+            "supported_formats".to_string(),
+            serde_json::json!([format_min, format_max]),
+        );
+    }
+    pack.insert(
+        "description".to_string(),
+        serde_json::json!(request.description),
+    );
+    let built = serde_json::json!({ "pack": pack });
     let built_bytes = serde_json::to_vec(&built)
         .map_err(|error| MergeError::new(format!("pack.mcmeta 序列化失败: {error}")))?;
     entries.insert(

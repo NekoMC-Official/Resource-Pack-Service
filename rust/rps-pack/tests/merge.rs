@@ -468,10 +468,9 @@ fn requested_format_overrides_intersection_max() {
     let mcmeta: serde_json::Value =
         serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta")).unwrap();
     assert_eq!(mcmeta["pack"]["pack_format"], 99);
-    assert_eq!(
-        mcmeta["pack"]["supported_formats"],
-        serde_json::json!([50, 60])
-    );
+    assert_eq!(mcmeta["pack"]["min_format"], 50);
+    assert_eq!(mcmeta["pack"]["max_format"], 60);
+    assert!(mcmeta["pack"]["supported_formats"].is_null());
 }
 
 #[test]

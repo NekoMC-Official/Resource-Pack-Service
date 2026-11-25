@@ -2,35 +2,48 @@ package moe.nekomc.resourcepack.delivery;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import moe.nekomc.resourcepack.ResourcePackServicePlugin;
+import moe.nekomc.resourcepack.api.PackStatus;
+import moe.nekomc.resourcepack.api.PackStatusEvent;
 import moe.nekomc.resourcepack.pack.PackSnapshot;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerResourcePackStatusEvent;
 
 /**
  * 本插件自己的下发通道：内置 HTTP 出口 + Folia 实体调度器推送 + 客户端回执处理。
  *
- * <p>这里只做"平台边界"的事：事件监听、玩家线程调度、setResourcePack 调用、断开与提示。
+ * <p>这里只做“平台边界”的事：事件监听、玩家线程调度、setResourcePack 调用、断开与提示。
  * 地址从哪来、ETag 怎么算，都在 {@link PackHttpServer}；什么时候该推，在发布器。</p>
  */
 public final class PackPusher implements Listener, AutoCloseable {
 
     private static final String LOG_PREFIX = "[资源包] ";
+    private static final String DEFAULT_REJECT = "<red>本服资源包为必装项。请重新进入并在提示中点“是”，"
+            + "或在 选项 → 资源包 中把服务器资源包设为“已启用”。</red>";
 
     private final ResourcePackServicePlugin plugin;
     private final PackHttpServer server;
     private final int joinDelayTicks;
     private final boolean statusFeedback;
     private final boolean required;
+    private final boolean announceRequired;
     private final String prompt;
+    private final String rejectMessage;
+
+    private final DeliveryStatusStore statuses = new DeliveryStatusStore();
+    private final ConcurrentHashMap<UUID, String> pushedSha1 = new ConcurrentHashMap<>();
 
     private volatile String lastUrl = "";
     private volatile String lastSha1 = "";
@@ -41,13 +54,17 @@ public final class PackPusher implements Listener, AutoCloseable {
             int joinDelayTicks,
             boolean statusFeedback,
             boolean required,
-            String prompt) {
+            boolean announceRequired,
+            String prompt,
+            String rejectMessage) {
         this.plugin = plugin;
         this.server = server;
         this.joinDelayTicks = Math.max(0, joinDelayTicks);
         this.statusFeedback = statusFeedback;
         this.required = required;
+        this.announceRequired = announceRequired;
         this.prompt = prompt == null ? "" : prompt;
+        this.rejectMessage = rejectMessage == null || rejectMessage.isBlank() ? DEFAULT_REJECT : rejectMessage;
     }
 
     /** 状态页上的下发方式名称。 */
@@ -115,7 +132,14 @@ public final class PackPusher implements Listener, AutoCloseable {
         }
     }
 
-    /** 向一个在线玩家推送；返回排程数（0 表示没地址或玩家不在线）。 */
+    /**
+     * 向一个在线玩家推送；返回排程数（0 表示没地址或玩家不在线）。
+     *
+     * <p>force 表示调用方要求重新推送；服务端不按 sha1 去重，同摘要也会重新调用
+     * {@code setResourcePack}，客户端可命中缓存而不弹确认。客户端的“必需”标记只来自
+     * {@code provider.required}，与 force 无关：必需包由服务端在收到 DECLINED 后按
+     * {@code provider.reject-message} 断开，避免被客户端内置文案抢先。</p>
+     */
     public int push(UUID player, boolean force) {
         if (player == null) {
             return 0;
@@ -138,8 +162,14 @@ public final class PackPusher implements Listener, AutoCloseable {
             return 0;
         }
         String target = url;
-        byte[] hash = Sha1Hex.toBytes(sha1);
-        boolean needed = force || required;
+        String targetSha1 = sha1 == null ? "" : sha1;
+        byte[] hash = Sha1Hex.toBytes(targetSha1);
+        // provider.announce-required 决定是否把“必需”标记交给客户端：
+        //   false（默认）——客户端只当可选包（Yes/No），拒绝后由服务端按 provider.required 断开，
+        //            这样 provider.reject-message 一定是我们自己的文案。
+        //   true ——客户端收到 required=true：连“已禁用”档位也会弹必装框（Proceed / Disconnect）；
+        //            拒绝时客户端会先用它自己的文案断开，reject-message 只作服务端兜底。
+        boolean needed = announceRequired;
         String hint = prompt;
         online.getScheduler().execute(plugin, () -> {
             if (online.isOnline()) {
@@ -148,6 +178,9 @@ public final class PackPusher implements Listener, AutoCloseable {
                 } else {
                     online.setResourcePack(target, hash, hint, needed);
                 }
+                pushedSha1.put(player, targetSha1);
+                statuses.record(player, online.getName(), PackStatus.PENDING, targetSha1);
+                fire(online, PackStatus.PENDING, targetSha1);
             }
         }, null, 1L);
         return 1;
@@ -156,6 +189,21 @@ public final class PackPusher implements Listener, AutoCloseable {
     /** 让玩家重新加载一次资源包；不需要强制时由调用方传 false。 */
     public int refresh(UUID player) {
         return push(player, false);
+    }
+
+    /** 玩家当前状态；未知返回 UNKNOWN。 */
+    public PackStatus status(UUID player) {
+        return statuses.status(player);
+    }
+
+    /** 玩家成功加载时使用的 SHA-1；没有则 null。 */
+    public String hashOf(UUID player) {
+        return statuses.hash(player);
+    }
+
+    /** 最近的状态，新的在前。 */
+    public List<DeliveryStatusStore.Entry> recent(int limit) {
+        return statuses.recent(limit);
     }
 
     @EventHandler
@@ -168,9 +216,29 @@ public final class PackPusher implements Listener, AutoCloseable {
     }
 
     @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        UUID player = event.getPlayer().getUniqueId();
+        statuses.remove(player);
+        pushedSha1.remove(player);
+    }
+
+    @EventHandler
     public void onStatus(PlayerResourcePackStatusEvent event) {
         Player player = event.getPlayer();
         PlayerResourcePackStatusEvent.Status status = event.getStatus();
+        String sha1 = pushedSha1.getOrDefault(player.getUniqueId(), lastSha1);
+        PackStatus mapped = switch (status) {
+            case SUCCESSFULLY_LOADED -> PackStatus.LOADED;
+            case DECLINED -> PackStatus.DECLINED;
+            case FAILED_DOWNLOAD -> PackStatus.FAILED;
+            case INVALID_URL -> PackStatus.INVALID_URL;
+            case ACCEPTED, DOWNLOADED -> PackStatus.PENDING;
+            default -> null;
+        };
+        if (mapped != null) {
+            statuses.record(player.getUniqueId(), player.getName(), mapped, sha1);
+            fire(player, mapped, sha1);
+        }
         switch (status) {
             case SUCCESSFULLY_LOADED -> {
                 if (statusFeedback) {
@@ -184,7 +252,7 @@ public final class PackPusher implements Listener, AutoCloseable {
                     plugin.getLogger().warning(LOG_PREFIX + "玩家 " + player.getName() + " 拒绝了必装资源包，已排程断开");
                     player.getScheduler().execute(plugin, () -> {
                         if (player.isOnline()) {
-                            player.kick(Component.text("本服资源包为必装项，请允许后再进入", NamedTextColor.RED));
+                            player.kick(MiniMessage.miniMessage().deserialize(rejectMessage));
                         }
                     }, null, 1L);
                 } else if (statusFeedback) {
@@ -202,6 +270,14 @@ public final class PackPusher implements Listener, AutoCloseable {
         }
     }
 
+    private void fire(Player player, PackStatus status, String sha1) {
+        PackStatusEvent event = new PackStatusEvent(player.getUniqueId(), status, sha1);
+        player.getScheduler().execute(plugin,
+                () -> Bukkit.getPluginManager().callEvent(event),
+                null,
+                1L);
+    }
+
     private String describeUrl() {
         String url = lastUrl;
         return url.isBlank() ? "（还没有可用地址）" : url;
@@ -217,5 +293,6 @@ public final class PackPusher implements Listener, AutoCloseable {
         }
         lastUrl = "";
         lastSha1 = "";
+        pushedSha1.clear();
     }
 }

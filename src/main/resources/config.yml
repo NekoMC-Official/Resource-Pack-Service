@@ -1,9 +1,20 @@
 # 资源包服务配置
 provider:
-  # 资源包是否必装：true 时客户端拒绝会断开连接
+  # 服务端强制策略：true 时玩家拒绝资源包（DECLINED）会按 reject-message 断开。
+  # 它不改变客户端弹什么框：客户端是否弹窗由玩家在该服务器条目的
+  # 「Server Resource Packs」（提示 / 已启用 / 已禁用）决定。档位为「已禁用」且
+  # announce-required=false 时，客户端不弹窗、静默回 DECLINED，然后被这里断开。
+  # 对所有来源、所有玩家、所有推送路径生效；false 时玩家下次进服仍会再推。
   required: false
+  # 是否把“必需”标记随资源包发给客户端；不写＝跟随 required，显式 true/false 覆盖。
+  # true：客户端即使档位为「已禁用」也会弹必装框（Proceed / Disconnect），
+  #       拒绝时客户端先用它自己的文案断开，reject-message 只作服务端兜底。
+  # false：客户端一律当可选包（Yes/No），拒绝后由 required 决定是否断开。
+  # announce-required: false
   # 客户端看到的一句提示
   prompt: ""
+  # required 或 announce-required 生效时客户端拒绝的断开原因（MiniMessage）；留空使用内置自解释文案
+  reject-message: ""
 
 merge:
   policy: override
@@ -38,7 +49,7 @@ delivery:
 community:
   # 社区资源包目录：由发布包里的 community-packs.zip 解压得到
   enabled: true
-  dir: "plugins/Resource Pack Service/community"
+  dir: "plugins/ResourcePackService/community"
   # 社区包在合成时的层序偏移；具体包的 priority 会叠加在它上面
   priority: 0
   # 服务端 Minecraft 版本（如 1.21.8）；空串表示不额外限制版本，由各包的 minecraft 范围决定

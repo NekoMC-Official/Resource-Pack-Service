@@ -28,6 +28,13 @@ class PluginDescriptorTest {
     }
 
     @Test
+    void usesAPluginNamePaperAccepts() throws Exception {
+        String name = descriptor().getString("name");
+        assertNotNull(name);
+        assertFalse(name.contains(" "), "Paper 26.x 不允许插件名包含空格");
+    }
+
+    @Test
     void declaresMainClassAndFoliaSupport() throws Exception {
         YamlConfiguration yml = descriptor();
         assertEquals("moe.nekomc.resourcepack.ResourcePackServicePlugin", yml.getString("main"));
