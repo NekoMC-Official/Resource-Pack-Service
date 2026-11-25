@@ -226,6 +226,7 @@ jobs:
               --jq '[.artifacts[] | select(.name == "github-pages")] | length')
             if [ "$count" -eq 1 ]; then
               echo "Pages artifact ready"
+              sleep 15
               exit 0
             fi
             echo "waiting for Pages artifact ($count found)"
