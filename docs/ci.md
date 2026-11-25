@@ -6,14 +6,14 @@
 
 - 触发：推送到 `main`、任意 Pull Request、手动 `workflow_dispatch`。
 - 环境：`ubuntu-latest` + Python 3.12 + Zulu JDK 26 + Rust stable。
-- 步骤：`python -m unittest discover -s tools`（绑定选择与变体规则）→ `cargo test` → `cargo build --release` → `./gradlew build`（通过 `RPS_PACK_BIN` 指向刚编出的合并器）→ 上传 `resource-pack-service.jar`。
+- 步骤：`python -m unittest discover -s tools`（绑定选择与变体规则）→ `cargo test` → `cargo build --release` → `./gradlew build`（通过 `RPS_PACK_BIN` 指向刚编出的合并器）→ 上传 `resource-pack-service-<版本>.jar`（默认 `0.1.0`，工作流内可用 `-Pversion=` 覆盖）。
 - 构建机是 Linux，所以产物里的内置合并器是 **linux-x86_64**，可直接部署到 Linux 服务端。
 
 ## Release（`release.yml`）
 
 - 触发：推送 `v*` 标签，例如 `git tag v0.1.0 && git push origin v0.1.0`。
 - 矩阵：`ubuntu-latest` 产出 `resource-pack-service-<版本>-linux-x86_64.jar`，`windows-latest` 产出 `...-windows-x86_64.jar`。
-- 版本号通过 `-Pversion=` 注入 Gradle，`plugin.yml` 里的 `version` 会跟着变。
+- 版本号通过 `-Pversion=` 注入 Gradle，`plugin.yml` 里的 `version` 与 jar 文件名（`resource-pack-service-<版本>.jar`）都会跟着变。
 - 两个 jar 自动附加到对应 GitHub Release，并生成发行说明。
 
 > jar 内只带**构建平台**的 `rps-pack`。Linux 服务端请用 linux 产物；Windows 产物只用于 Windows 服务端或在 Windows 上做合并。

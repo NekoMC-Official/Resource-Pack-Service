@@ -38,7 +38,7 @@ zip，合并、版本、缓存、推送、回执全部由本服务统一处理�
 | 宿主边界 | Java 25 字节码（JDK 26 toolchain，`--release 25`） | 插件入口、事件、HTTP、推送、对外 API |
 | 编排 | Kotlin 2.4.21（`jvmTarget = 25`） | 配置、注册表、发布器、监听、命令、文案 |
 | 计算 | Rust 2024（serde / serde_json / sha1 / zip） | `rps-pack` 只做合并，随 jar 内置 |
-| 构建 | Gradle 9.9.2 + Shadow 9.6.1 | 产出单个 `resource-pack-service.jar` |
+| 构建 | Gradle 9.9.2 + Shadow 9.6.1 | 产出单个 `resource-pack-service-<版本>.jar` |
 | 测试 | JUnit 6.1.3 / cargo test / unittest | Java 92 项（19 个测试类），Rust 26 项（19 项合并集成 + 2 项 mcmeta + 5 项单元），Python 27 项绑定测试 |
 | 文本 | Adventure + MiniMessage | 提示语与 `push.notify-message` |
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## 安装
 
-1. 把 `resource-pack-service.jar` 放进服务端 `plugins/`。
+1. 把 `resource-pack-service-<版本>.jar` 放进服务端 `plugins/`（文件名不影响加载，带版本号便于核对）。
 2. 启动一次，生成 `plugins/ResourcePackService/config.yml`。从 0.1.6 起插件名改为无空格的 `ResourcePackService`（Paper 26.x 拒绝带空格的描述符）；首次启动会把旧目录 `plugins/Resource Pack Service` 的内容自动迁移过来。
 3. 按需改下载出口与来源，然后 **COLD 重启**（Bukkit 插件不支持热装）。
 4. 确认 `server.properties` 里这两项为空：
@@ -328,7 +328,7 @@ record 与事件（`ResourcePackService`、`BuildResult`、`PackStatus`、`PackS
 
 ```kotlin
 dependencies {
-    compileOnly(files("libs/resource-pack-service.jar"))
+    compileOnly(files("libs/resource-pack-service-0.1.0.jar"))
 }
 ```
 
@@ -452,7 +452,7 @@ community:
 
 产物：
 
-- `build/libs/resource-pack-service.jar`：可直接部署，内含当前平台的 `rps-pack`。
+- `build/libs/resource-pack-service-<版本>.jar`：可直接部署，内含当前平台的 `rps-pack`，文件名带 Gradle `version`（CI 用 `-Pversion=` 注入，本地缺省 `0.1.0`）。
 
 构建只产出这一个 jar：`moe.nekomc.resourcepack.api` 接口已打在本体内，下游插件编译期依赖与运行期部署用的是同一个文件，不再有独立的 api jar，也不再保留 plain jar。
 

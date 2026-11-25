@@ -82,7 +82,8 @@ tasks.named<Jar>("shadowJar") {
     }
     archiveBaseName.set("resource-pack-service")
     archiveClassifier.set("")
-    archiveVersion.set("")
+    // 交付包带版本号，与 Release 标签一一对应；服务端部署时文件名随意
+    archiveVersion.set(project.version.toString())
 }
 
 // ---- Rust 合并器（可选产物，本机没有 cargo 时自动跳过） ----

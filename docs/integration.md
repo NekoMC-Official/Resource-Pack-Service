@@ -33,7 +33,7 @@ flowchart LR
 
 ```kotlin
 dependencies {
-    compileOnly(files("libs/resource-pack-service.jar"))
+    compileOnly(files("libs/resource-pack-service-0.1.0.jar"))
 }
 ```
 

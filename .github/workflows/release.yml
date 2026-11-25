@@ -40,7 +40,8 @@ jobs:
           BIN="$PWD/rust/rps-pack/target/release/rps-pack"
           if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
           RPS_PACK_BIN="$BIN" ./gradlew build --no-daemon -Pversion="$VERSION"
-          cp build/libs/resource-pack-service.jar "resource-pack-service-${VERSION}-${{ matrix.platform }}.jar"
+          JAR="$(ls build/libs/resource-pack-service-*.jar | head -n1)"
+          cp "$JAR" "resource-pack-service-${VERSION}-${{ matrix.platform }}.jar"
       - uses: actions/upload-artifact@v7
         with:
           name: resource-pack-service-${{ matrix.platform }}

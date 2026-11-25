@@ -45,5 +45,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: resource-pack-service-linux-x86_64
-          path: build/libs/resource-pack-service.jar
+          path: build/libs/resource-pack-service-*.jar
           if-no-files-found: error

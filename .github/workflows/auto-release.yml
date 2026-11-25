@@ -249,7 +249,7 @@ jobs:
           TARGET: ${{ github.sha }}
         run: |
           set -euo pipefail
-          ASSETS=("build/libs/resource-pack-service.jar")
+          ASSETS=("$(ls build/libs/resource-pack-service-*.jar | head -n1)")
           if [ -f build/community-packs.zip ]; then
             ASSETS+=("build/community-packs.zip")
             ASSETS+=("build/pack-summary.md")
