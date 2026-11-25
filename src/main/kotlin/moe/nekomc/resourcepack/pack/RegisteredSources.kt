@@ -46,6 +46,13 @@ class RegisteredSources(
         return removed
     }
 
+    override fun invalidate(id: String) {
+        if (id.isBlank() || !registered.containsKey(id)) {
+            return
+        }
+        host.rebuild(false)
+    }
+
     override fun sourceIds(): Set<String> = HashSet(registered.keys)
 
     override fun version(): Int = host.status().version()
@@ -85,6 +92,7 @@ class RegisteredSources(
         source.file(),
         source.sha1(),
         source.priority(),
-        source.namespaces()
+        source.namespaces(),
+        source.version()
     )
 }

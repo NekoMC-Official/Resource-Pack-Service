@@ -1,5 +1,30 @@
+# pack.yml：社区资源包元数据。带 # 的行是注释，不会被解析。
 id: example
 name: 示例资源包
-priority: 0
-description: 复制这个目录并改名后开始写自己的资源包
 license: CC-BY-4.0
+priority: 0
+
+# 内容版本。包内文件有实质变化时递增，便于审计与排查。
+version: 0.1.0
+
+# 兼容的 Minecraft 版本范围，支持空格 AND 与逗号 OR；留空表示不限。
+minecraft: ">=26.3 <26.4"
+
+# 绑定关系：official / addon / patch / integration / standalone
+# standalone 不绑定具体插件，必须写 plugin: universal。
+plugin: universal
+relation: standalone
+
+# auto：进入自动发行候选；manual：只进预览与手动发行；none：不进入社区包。
+# 新增包即使写 auto，第一次也必须由维护者用 workflow_dispatch 的 force_packs 批准。
+release: manual
+
+# 同一个插件有多个官方包（例如不同分辨率）时，用 variant 分组，并且只给一个 default: true。
+# 非 official 的包也可以用 variant 组成互斥组。
+variant: ""
+default: false
+
+# 可选的插件版本范围，只做声明与记录，不在仓库构建时解析插件版本。
+# requires: ">=1.4.0 <2.0.0"
+
+description: 复制这个目录并改名后开始写自己的资源包

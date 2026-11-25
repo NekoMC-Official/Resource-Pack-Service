@@ -31,7 +31,19 @@ class RpsConfig private constructor(
     private val httpBindAddress: String,
     private val httpPortNumber: Int,
     private val httpUrlPath: String,
-    private val httpPublicUrl: String
+    private val httpPublicUrl: String,
+    private val communityOn: Boolean,
+    private val communityDirectory: Path,
+    private val communityLayerPriority: Int,
+    private val communityMinecraftVersion: String,
+    private val communityPackFormatNumber: Int,
+    private val communityRemoteOn: Boolean,
+    private val communityRemoteIndexUrl: String,
+    private val communityRemoteInterval: Long,
+    private val communityRemoteTimeout: Long,
+    private val communityRemoteMaxPackBytes: Long,
+    private val communityRemoteRequireHttps: Boolean,
+    private val communityRemotePinSha1: String
 ) {
 
     /** 资源包是否必装：客户端拒绝时断开。 */
@@ -89,7 +101,46 @@ class RpsConfig private constructor(
     /** 对外下载地址；非空时优先于自动拼装，适用于反代或 CDN。 */
     fun deliveryPublicUrl(): String = httpPublicUrl
 
+    /** 是否加载社区资源包目录。 */
+    fun communityEnabled(): Boolean = communityOn
+
+    /** 社区资源包目录（已解析为绝对路径）。 */
+    fun communityDir(): Path = communityDirectory
+
+    /** 社区包在合成层序里的基准优先级。 */
+    fun communityPriority(): Int = communityLayerPriority
+
+    /** 社区包适用的 Minecraft 版本；空串表示不检查。 */
+    fun communityMinecraft(): String = communityMinecraftVersion
+
+    /** 服务端当前资源包格式；0 表示不检查。 */
+    fun communityPackFormat(): Int = communityPackFormatNumber
+
+    /** 是否自动从远程索引更新社区包。 */
+    fun communityRemoteEnabled(): Boolean = communityRemoteOn
+
+    /** 远程索引地址。 */
+    fun communityIndexUrl(): String = communityRemoteIndexUrl
+
+    /** 远程检查间隔（分钟）。 */
+    fun communityIntervalMinutes(): Long = communityRemoteInterval
+
+    /** 单次 HTTP 请求超时（毫秒）。 */
+    fun communityTimeoutMs(): Long = communityRemoteTimeout
+
+    /** 单个社区包允许的最大字节数。 */
+    fun communityMaxPackBytes(): Long = communityRemoteMaxPackBytes
+
+    /** 是否要求索引与包都走 HTTPS。 */
+    fun communityRequireHttps(): Boolean = communityRemoteRequireHttps
+
+    /** 可选的索引正文 SHA-256 固定值；空串表示不校验。 */
+    fun communityPinSha1(): String = communityRemotePinSha1
+
     companion object {
+
+        private const val DEFAULT_INDEX =
+            "https://nekomc-official.github.io/Resource-Pack-Service/community-index.json"
 
         private const val DEFAULT_NOTIFY =
             "<click:run_command:'/rps push'><gray>资源包已更新，<white><u>点这里</u><gray>立即重载</click>"
@@ -128,6 +179,17 @@ class RpsConfig private constructor(
             }
 
             val format = parseFormat(config.getString("merge.pack-format", "auto"))
+            val communityDir = root.resolve(config.getString("community.dir", "plugins/Resource Pack Service/community") ?: "community").normalize()
+            val communityMinecraft = (config.getString("community.minecraft", "") ?: "").trim()
+            val communityPackFormatValue = config.get("community.pack-format")?.toString()?.trim().orEmpty()
+            // 缺省时沿用 merge.pack-format 的具体数字；merge.pack-format 为 auto 时 format 已是 0，即不按格式过滤
+            val communityPackFormat =
+                if (communityPackFormatValue.isEmpty()) format
+                else communityPackFormatValue.toIntOrNull()?.coerceAtLeast(0) ?: format
+        val communityRemoteIndex = (config.getString("community.remote.index-url", DEFAULT_INDEX) ?: DEFAULT_INDEX).trim()
+        val communityRemoteInterval = config.getLong("community.remote.interval-minutes", 60L).coerceAtLeast(5L)
+        val communityRemoteTimeout = config.getLong("community.remote.timeout-ms", 30_000L).coerceIn(1_000L, 300_000L)
+        val communityRemoteMaxPack = config.getLong("community.remote.max-pack-bytes", 67_108_864L).coerceAtLeast(1L)
             val interval = config.getLong("watch.interval-seconds", 60L)
 
             return RpsConfig(
@@ -150,7 +212,19 @@ class RpsConfig private constructor(
                 httpBindAddress = config.getString("delivery.http.bind", "0.0.0.0") ?: "0.0.0.0",
                 httpPortNumber = config.getInt("delivery.http.port", 25580),
                 httpUrlPath = config.getString("delivery.http.path", "/pack/merged.zip") ?: "/pack/merged.zip",
-                httpPublicUrl = (config.getString("delivery.http.public-url", "") ?: "").trim()
+                httpPublicUrl = (config.getString("delivery.http.public-url", "") ?: "").trim(),
+            communityOn = config.getBoolean("community.enabled", true),
+            communityDirectory = communityDir,
+            communityLayerPriority = config.getInt("community.priority", 0),
+            communityMinecraftVersion = communityMinecraft,
+            communityPackFormatNumber = communityPackFormat,
+            communityRemoteOn = config.getBoolean("community.remote.enabled", false),
+            communityRemoteIndexUrl = communityRemoteIndex,
+            communityRemoteInterval = communityRemoteInterval,
+            communityRemoteTimeout = communityRemoteTimeout,
+            communityRemoteMaxPackBytes = communityRemoteMaxPack,
+            communityRemoteRequireHttps = config.getBoolean("community.remote.require-https", true),
+            communityRemotePinSha1 = (config.getString("community.remote.pin-sha1", "") ?: "").trim()
             )
         }
 

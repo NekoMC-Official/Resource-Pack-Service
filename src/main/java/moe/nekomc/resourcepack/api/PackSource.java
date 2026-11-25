@@ -6,9 +6,10 @@ import java.util.List;
 /**
  * 本服务的资源包来源标准。
  *
- * <p>任何插件都可以实现这个接口，把自己产出的 zip 交给 Resource Pack Service 统一合并与下发，
- * 不需要关心服务器最终用哪个插件推送。实现类应是轻量的值对象：内容变化时重新
- * {@link ResourcePackService#register(PackSource) register} 一次即可。</p>
+ * <p>任何插件都可以实现这个接口，把自己产出的 zip 交给 Resource Pack Service 统一合并与下发。
+ * 实现类应是轻量的值对象：内容变化时重新
+ * {@link ResourcePackService#register(PackSource) register} 一次，或调用
+ * {@link ResourcePackService#invalidate(String)} 通知服务重建。</p>
  *
  * <p>合并层的规则：{@link #priority()} 越大越靠上层，同名条目由上层覆盖下层；
  * {@code lang/*.json}、{@code sounds.json}、{@code font/}、{@code atlases/} 按 key 深合并；
@@ -38,5 +39,15 @@ public interface PackSource {
     /** 占用到的 assets 命名空间，仅用于报告。 */
     default List<String> namespaces() {
         return List.of();
+    }
+
+    /**
+     * 来源内容的可读版本，仅用于展示与排障，不参与合并顺序。
+     *
+     * <p>为空表示来源没有声明版本；服务不会据此判断文件是否变化，文件变化仍以
+     * sha1 与 mtime 为准。</p>
+     */
+    default String version() {
+        return "";
     }
 }

@@ -153,9 +153,11 @@ sources:
 
   - id: "community/seasonal"
     enabled: true
-    path: "community-pack.zip"
+    path: "plugins/Resource Pack Service/community/seasonal.zip"
     priority: 10
 ```
+
+社区目录里的包通常不需要写进 `sources`：插件会按 `manifest.json` 与已安装插件自动筛选。只有确实要绕过绑定、把某个独立 zip 当普通来源时才这样写。
 
 改完：
 
@@ -190,7 +192,9 @@ curl -fL --retry 3 -o plugins/Resource\ Pack\ Service/remote.zip \
 ## 方式五：把包提进仓库（社区资源包）
 
 适合公开分发的材质包。按 `packs/<id>/` 放 `pack.yml`、`pack.mcmeta`、
-`assets/<namespace>/`，提 PR 后由机器人校验、预览、合并发版。规范见
+`assets/<namespace>/`，并在 `pack.yml` 里声明 `plugin`、`relation`、`release`。
+提 PR 后由机器人校验、预览；合并进 `main` 后不会因为新增包就自动发行，
+第一次需要维护者在 Auto Release 的 `force_packs` 里批准。规范见
 [packs/README.md](../packs/README.md)。
 
 ## 选型表

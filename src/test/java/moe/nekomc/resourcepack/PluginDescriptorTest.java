@@ -39,7 +39,7 @@ class PluginDescriptorTest {
     void declaresGranularPermissions() throws Exception {
         YamlConfiguration yml = descriptor();
         for (String node : new String[]{"rps.use", "rps.status", "rps.list", "rps.diff",
-                "rps.check", "rps.build", "rps.reload", "rps.push", "rps.admin"}) {
+                "rps.check", "rps.build", "rps.reload", "rps.push", "rps.community", "rps.admin"}) {
             assertNotNull(yml.get("permissions." + node), "缺少权限节点 " + node);
         }
         assertEquals("rps.use", yml.getString("commands.rps.permission"));

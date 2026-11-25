@@ -32,6 +32,10 @@ Java（宿主边界）
   merge/RustPackMerger        启动 rps-pack、解析 JSON 结果
   merge/BundledRust           从 jar 解出当前平台二进制
   pack/PackSnapshot           跨层不可变快照（Java record）
+  pack/CommunityPack          社区包元数据（Java record）
+  pack/CommunitySelection     选择结果（Java record）
+  pack/CommunitySkip          跳过原因（Java record）
+  pack/SelectionContext       已安装插件、版本、MC 与 format 的判定上下文（Java record）
         ↓
 Kotlin（编排）
   config/RpsConfig            读取与校验 config.yml
@@ -39,6 +43,13 @@ Kotlin（编排）
   core/StateStore             sha1 → 世代号
   pack/PackPublisher          异步单飞、落盘、换代、通知
   pack/RegisteredSources      ResourcePackService 的实现
+  pack/CommunitySelector      绑定、版本、format、requires 与变体选择
+  pack/VersionRange           Minecraft / 插件版本范围解析
+  pack/PackHost               发布器依赖的宿主端口
+  command/RpsCommandHost      命令依赖的宿主端口
+  config/CommunityBundle      读取 manifest 并产出社区来源
+  pack/CommunityIndex         解析 Pages 索引并生成 manifest
+  pack/CommunityUpdater       拉取索引、按需下载、校验与原子替换
   pack/EntryManifest          entries.txt / entries.prev.txt 与 diff
   pack/PackConflictScanner    扫描其它插件的疑似推送配置
   watch/SourceWatcher         mtime 轮询
@@ -68,6 +79,7 @@ public interface PackSource {
     default boolean enabled() { return true; }
     default String sha1() { return null; }
     default List<String> namespaces() { return List.of(); }
+    default String version() { return ""; }
 }
 
 public interface ResourcePackService {
@@ -79,6 +91,7 @@ public interface ResourcePackService {
     String sha1();
     void rebuild(boolean announce);
     int push(UUID player, boolean force);
+    void invalidate(String id);
 }
 ```
 
@@ -95,9 +108,11 @@ ResourcePackService service = Bukkit.getServicesManager().load(ResourcePackServi
 | `register` | `id` 为空或 `file` 为 null 返回 false；同 id 覆盖；成功即触发异步重建 |
 | `unregister` | 不存在返回 false；成功即触发异步重建 |
 | `sourceIds` | 只含 API 登记的来源，不含 `config.yml` 的 `sources` |
+| `PackSource.version` | 可选的内容版本；空串表示未声明，只用于 `/rps list` 展示，不参与世代号与合并顺序 |
 | `version` | 当前成功构建的世代号；从未成功为 0 |
 | `url` / `sha1` | 当前快照；未构建或没有下载地址时为空串 |
 | `push` | 只对在线玩家生效，返回排程数量；不等待客户端回执 |
+| `invalidate` | 来源 id 为空或未登记时无操作；否则触发一次异步重建，用于插件重写了本地 zip |
 | 配置来源与 API 来源同 id | API 来源覆盖配置来源 |
 
 API 来源在 `/rps reload` 后由 `RegisteredSources.reapply` 重新投回新注册表，
@@ -241,15 +256,15 @@ registry.ordered()
 | HTTP 端口被占用 | 记录 `SEVERE`；若填了 `public-url` 仍可推送 |
 | `public-url` 指向回环 | `/rps check` 警告，远程玩家会下载失败 |
 
-没有“自动回退到 Java 合并器”：Rust 是唯一实现，缺失就明确报错，避免两份实现结果不一致。
+没有第二套合并实现：Rust 是唯一实现，缺失就明确报错，避免两份实现结果不一致。
 
 ## 10. 测试
 
-- Java：`./gradlew test`，36 项，覆盖 API 注册表、URL 拼接、HTTP 出口、内置二进制解出、
-  Rust 合并器集成、条目清单、插件描述符、配置体检扫描等。
+- Java：`./gradlew test`，76 项，覆盖 API 注册表与 invalidate、社区包选择与版本范围、索引解析、远程更新与校验、URL 拼接、HTTP 出口、内置二进制解出、Rust 合并器集成、条目清单、插件描述符、配置体检扫描等。
 - Rust：`cd rust/rps-pack && cargo test`，14 项集成测试，覆盖层序、冲突策略、
   JSON 深合并、mcmeta 交集、确定性、zip slip、缺失 mcmeta 等。
-- CI 在 Ubuntu 上同时跑 `cargo test` 与 `./gradlew build`，并把合并器路径通过
+- Python：`python -m unittest discover -s tools`，24 项，覆盖 official 变体默认、addon/patch 依赖、integration 多插件闭合、release=none、优先级排序、version / minecraft / format 范围解析、索引生成，以及内容变更但 version 未递增时发行计划失败的闸门。
+- CI 在 Ubuntu 上跑 `python -m unittest discover -s tools`、`cargo test` 与 `./gradlew build`，并把合并器路径通过
   `RPS_PACK_BIN` 传给集成测试。
 
 ## 11. 里程碑
@@ -263,8 +278,9 @@ registry.ordered()
 | M4 | `rps-pack` 合并、去重、JSON 深合并 | 完成 |
 | M5 | 二进制随 jar 内置、缺失即报错、无回退 | 完成 |
 | M6 | 条目差异、内置 HTTP、进服推送、部署文档 | 完成 |
-| M7 | 社区资源包 PR 校验与自动发版 | 完成 |
-| M8 | 真实 Folia 服务端端到端联调 | 待做 |
+| M7 | 社区资源包 PR 校验、受控发行，以及服务端按已安装插件 / Minecraft 版本 / pack format / requires 筛选 | 完成（待真机 preflight） |
+| M8 | Pages 索引、服务端定时拉取、按需下载、sha1 校验与 `/rps community` | 完成（待真机 preflight） |
+| M9 | 真实 Folia 服务端端到端联调 | 待做 |
 
 ## 12. 已知风险与取舍
 

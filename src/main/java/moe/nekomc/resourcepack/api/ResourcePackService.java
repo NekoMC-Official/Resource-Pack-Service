@@ -22,6 +22,14 @@ public interface ResourcePackService {
     /** 注销来源并触发异步重建；不存在时返回 false。 */
     boolean unregister(String id);
 
+    /**
+     * 通知服务某个已登记来源的内容已经变化；服务会异步重建。
+     *
+     * <p>id 为空或未登记时不做任何事。插件重写自己的 zip 后调用这个方法即可，
+     * 不需要先 unregister 再 register。</p>
+     */
+    void invalidate(String id);
+
     /** 当前通过本接口登记的来源 id。 */
     Set<String> sourceIds();
 

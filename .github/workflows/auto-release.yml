@@ -1,19 +1,26 @@
 name: Auto Release
-
 on:
   push:
     branches: [main]
     paths:
-      - "packs/**"
-      - "src/**"
-      - "rust/**"
-      - "build.gradle.kts"
-      - "tools/packs.py"
-      - ".github/workflows/auto-release.yml"
+      - 'packs/**'
+      - 'src/**'
+      - 'rust/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'tools/packs.py'
+      - '.github/workflows/auto-release.yml'
   workflow_dispatch:
+    inputs:
+      force_packs:
+        description: '人工批准的资源包 id，逗号分隔；可包含本次新增的包'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: auto-release
@@ -21,114 +28,198 @@ concurrency:
 
 jobs:
   release:
-    if: github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message, '[skip release]')
+    if: github.actor != 'dependabot[bot]' && !contains(github.event.head_commit.message || '', '[skip release]')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Normalize wrapper
-        run: sed -i 's/\r$//' gradlew && chmod +x gradlew
+        run: |
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: '3.12'
+
+      - name: Build pack manifest
+        run: python tools/packs.py build --root packs --out build/packs
+
+      - name: Plan release
+        id: plan
+        env:
+          FORCE_PACKS: ${{ github.event.inputs.force_packs || '' }}
+        run: |
+          set -euo pipefail
+          PREV="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          python tools/packs.py plan \
+            --manifest build/packs/manifest.json \
+            --previous "$PREV" \
+            --force "$FORCE_PACKS" \
+            --out build/release-plan.json \
+            --ids-out build/approved-packs.txt \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Stop when nothing is approved
+        if: steps.plan.outputs.should_release != 'true'
+        run: |
+          echo "没有需要发行的代码或已批准资源包，跳过。"
+          echo "新增但未批准：${{ steps.plan.outputs.new_auto }}"
 
       - name: Set up Java
-        uses: actions/setup-java@v6.3.0
+        if: steps.plan.outputs.should_release == 'true'
+        uses: actions/setup-java@v6
         with:
           distribution: zulu
-          java-version: "26"
+          java-version: '26'
+          cache: gradle
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6.4.1
+        if: steps.plan.outputs.should_release == 'true'
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Set up Rust
+        if: steps.plan.outputs.should_release == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust
+        if: steps.plan.outputs.should_release == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust/rps-pack
+          workspaces: rust/rps-pack -> target
 
-      - name: Decide version
+      - name: Compute version
         id: version
+        if: steps.plan.outputs.should_release == 'true'
         run: |
-          git fetch --tags --force
-          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
-          if [ -z "$LATEST" ]; then
+          set -euo pipefail
+          PREV="${{ steps.plan.outputs.previous }}"
+          if [ -z "$PREV" ]; then
             VERSION="0.1.0"
           else
-            BASE="${LATEST#v}"
-            MAJOR="${BASE%%.*}"
-            REST="${BASE#*.}"
-            MINOR="${REST%%.*}"
-            PATCH="${REST##*.}"
-            VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            BASE="${PREV#v}"
+            BASE="${BASE%%-*}"
+            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE"
+            MAJOR="${MAJOR:-0}"
+            MINOR="${MINOR:-0}"
+            PATCH="${PATCH:-0}"
+            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
           fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "previous=${LATEST}" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build rps-pack
+        if: steps.plan.outputs.should_release == 'true'
+        run: cargo build --release --manifest-path rust/rps-pack/Cargo.toml
 
       - name: Build plugin
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: ./gradlew build -Pversion="${VERSION}" --no-daemon
+        if: steps.plan.outputs.should_release == 'true'
+        run: ./gradlew build -Pversion="${{ steps.version.outputs.version }}"
 
-      - name: Build community pack
-        if: hashFiles('packs/*/pack.yml') != ''
+      - name: Bundle approved packs
+        id: bundle
+        if: steps.plan.outputs.should_release == 'true' && steps.plan.outputs.packs_changed == 'true'
         run: |
-          cargo build --release --manifest-path rust/rps-pack/Cargo.toml
-          python tools/packs.py build --root packs --out build/packs
-          python tools/packs.py merge \
-            --packs build/packs \
-            --binary rust/rps-pack/target/release/rps-pack \
-            --out build/community-pack.zip \
-            --report build/community-pack.report.json \
-            --summary build/pack-summary.md
+          set -euo pipefail
+          ONLY="$(paste -sd, build/approved-packs.txt || true)"
+          if [ -n "$ONLY" ]; then
+            python tools/packs.py bundle \
+              --packs build/packs \
+              --only "$ONLY" \
+              --out build/community-packs.zip \
+              --summary build/pack-summary.md
+          else
+            echo "没有本次批准的社区资源包，只更新索引。"
+          fi
+          # 即使没有已批准的包，也要生成索引：撤包后必须把空索引发布出去。
+          python tools/packs.py index \
+            --manifest build/packs/manifest.json \
+            --only "$ONLY" \
+            --out build/pages
+          echo "has_packs=true" >> "$GITHUB_OUTPUT"
 
-      - name: Compose release notes
+      - name: Create release notes
+        if: steps.plan.outputs.should_release == 'true'
         env:
-          PREVIOUS: ${{ steps.version.outputs.previous }}
-          VERSION: ${{ steps.version.outputs.version }}
+          PREV: ${{ steps.plan.outputs.previous }}
+          NEW_AUTO: ${{ steps.plan.outputs.new_auto }}
+          WITHDRAWN: ${{ steps.plan.outputs.withdrawn }}
         run: |
+          set -euo pipefail
           {
-            echo "版本 ${VERSION}"
-            echo
             echo "## 变更"
-            echo
-            if [ -n "$PREVIOUS" ]; then
-              git log --pretty=format:'- %s (%h)' "${PREVIOUS}..HEAD"
+            if [ -n "$PREV" ]; then
+              git log --oneline "$PREV..HEAD"
             else
-              git log -20 --pretty=format:'- %s (%h)'
+              git log --oneline -10
             fi
             echo
+            echo "## 资源包"
             if [ -f build/pack-summary.md ]; then
-              echo
               cat build/pack-summary.md
+            else
+              echo "本次没有可发行的社区资源包。"
+            fi
+            echo
+            echo "## 索引"
+            if [ -f build/pages/community-index.json ]; then
+              echo "https://nekomc-official.github.io/Resource-Pack-Service/community-index.json"
+            else
+              echo "本次没有更新社区包索引。"
+            fi
+            echo
+            echo "## 已撤下"
+            if [ -n "$WITHDRAWN" ]; then
+              echo "$WITHDRAWN 已从索引撤下。"
+            else
+              echo "无。"
+            fi
+            echo
+            echo "## 新增但未自动发行"
+            if [ -n "$NEW_AUTO" ]; then
+              echo "$NEW_AUTO 需要维护者运行 Auto Release 并填写 force_packs 批准一次。"
+            else
+              echo "无。"
             fi
           } > build/release-notes.md
 
+      - name: Upload Pages artifact
+        if: steps.plan.outputs.should_release == 'true' && steps.plan.outputs.packs_changed == 'true' && steps.bundle.outputs.has_packs == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/pages
+
+      - name: Deploy Pages
+        id: deploy
+        if: steps.plan.outputs.should_release == 'true' && steps.plan.outputs.packs_changed == 'true' && steps.bundle.outputs.has_packs == 'true'
+        uses: actions/deploy-pages@v4
+
       - name: Publish release
+        if: steps.plan.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
           TARGET: ${{ github.sha }}
         run: |
+          set -euo pipefail
           ASSETS=("build/libs/resource-pack-service.jar")
-          if [ -f build/community-pack.zip ]; then
-            ASSETS+=("build/community-pack.zip")
-            ASSETS+=("build/community-pack.report.json")
-          fi
-          if [ -f build/pack-summary.md ]; then
+          if [ -f build/community-packs.zip ]; then
+            ASSETS+=("build/community-packs.zip")
             ASSETS+=("build/pack-summary.md")
           fi
-          gh release create "${TAG}" "${ASSETS[@]}" \
-            --target "${TARGET}" \
-            --title "Resource Pack Service ${VERSION}" \
+          if [ -f build/pages/community-index.json ]; then
+            ASSETS+=("build/pages/community-index.json")
+          fi
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --target "$TARGET" \
+            --title "Resource Pack Service $VERSION" \
             --notes-file build/release-notes.md

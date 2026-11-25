@@ -28,7 +28,7 @@ zip，合并、版本、缓存、推送、回执全部由本服务统一处理�
 - **回执处理**：加载成功、拒绝、下载失败都会记录；必装包被拒绝时会断开。
 - **对外标准 API**：其它插件实现 `PackSource` 并注册即可，不接触任何宿主类型。
 - **环境体检**：`/rps check` 检查下载地址、`server.properties` 残留配置、其它插件的疑似推送配置。
-- **社区资源包流水线**：PR 自动校验与预览，合并后自动发版，产物可直接作为来源使用。
+- **社区资源包流水线**：PR 自动校验与预览，合并后按绑定关系受控发行；服务端只加载本机已安装插件对应的包。
 
 ## 技术栈
 
@@ -38,8 +38,8 @@ zip，合并、版本、缓存、推送、回执全部由本服务统一处理�
 | 宿主边界 | Java 25 字节码（JDK 26 toolchain，`--release 25`） | 插件入口、事件、HTTP、推送、对外 API |
 | 编排 | Kotlin 2.4.21（`jvmTarget = 25`） | 配置、注册表、发布器、监听、命令、文案 |
 | 计算 | Rust 2024（serde / serde_json / sha1 / zip） | `rps-pack` 只做合并，随 jar 内置 |
-| 构建 | Gradle 9.5.1 + Shadow 9.6.1 | 产出单个 `resource-pack-service.jar` |
-| 测试 | JUnit 5.11.4 / cargo test | Java 36 项，Rust 14 项集成测试 |
+| 构建 | Gradle 9.9.2 + Shadow 9.6.1 | 产出单个 `resource-pack-service.jar` |
+| 测试 | JUnit 6.1.3 / cargo test / unittest | Java 76 项，Rust 14 项集成测试，Python 27 项绑定测试 |
 | 文本 | Adventure + MiniMessage | 提示语与 `push.notify-message` |
 
 依赖方向是单向的：**Java → Kotlin → Rust**。跨语言边界只传 JDK 类型和 Java record，
@@ -122,10 +122,13 @@ sources:
     priority: -100
     namespaces: ["bettermodel"]
 
-  - id: "community/seasonal"
+community:
+  enabled: true
+  dir: "plugins/Resource Pack Service/community"
+  priority: 0
+  remote:
     enabled: true
-    path: "plugins/Resource Pack Service/community-pack.zip"
-    priority: 10
+    index-url: "https://nekomc-official.github.io/Resource-Pack-Service/community-index.json"
 ```
 
 `path` 相对服务端根目录。`priority` 越大越靠上层；同一路径冲突时上层覆盖下层。
@@ -154,6 +157,18 @@ sources:
 | `merge.max-bytes` | `104857600` | 合成包大小上限，超过则本次构建失败并保留上一版 |
 | `merge.description` | `NekoMC 统一资源包` | 写进 `pack.mcmeta` 的 description |
 | `output.dir` | `merged` | 相对插件数据目录，存放 `merged.zip` 与条目清单 |
+| `community.enabled` | `true` | 是否加载社区资源包目录 |
+| `community.dir` | `plugins/Resource Pack Service/community` | 社区包目录，内含 `manifest.json` 与各包 zip |
+| `community.priority` | `0` | 社区包的层序偏移，叠加在各包自己的 `priority` 上 |
+| `community.minecraft` | 空 | 服务端 Minecraft 版本；空表示不额外限制，由各包的 `minecraft` 范围决定 |
+| `community.pack-format` | 跟随 `merge.pack-format` | 服务端资源包格式。留空时若 `merge.pack-format` 是具体数字就沿用，否则为 `0`；`0` 表示不按格式过滤，交给合成阶段取各包格式范围的交集 |
+| `community.remote.enabled` | `false` | 是否定时拉取 Pages 索引并按需下载社区包 |
+| `community.remote.index-url` | Pages 索引地址 | `community-index.json` 的完整 URL |
+| `community.remote.interval-minutes` | `60` | 索引检查间隔，最小 5 分钟 |
+| `community.remote.timeout-ms` | `30000` | 单次 HTTP 请求超时，1000–300000 |
+| `community.remote.max-pack-bytes` | `67108864` | 单个社区包的大小上限 |
+| `community.remote.require-https` | `true` | 拒绝非 HTTPS 的索引与包地址 |
+| `community.remote.pin-sha1` | 空 | 固定索引内容的 SHA-1 / SHA-256，防止索引被替换 |
 | `delivery.join-delay-ticks` | `1` | 进服后延迟多少 tick 推送 |
 | `delivery.status-feedback` | `true` | 是否把加载/拒绝结果回显给玩家 |
 | `delivery.http.enabled` | `true` | 是否启动内置 HTTP 出口 |
@@ -182,6 +197,8 @@ sources:
 | `/rps push <玩家>` | 给指定玩家推送 | `rps.push` 或 `rps.admin` |
 | `/rps check` | 检查下载地址、`server.properties`、其它插件的疑似推送配置 | `rps.check` |
 | `/rps diff` | 对比本次与上次的条目差异 | `rps.diff` |
+| `/rps community` | 查看社区目录、已纳入数量与远程索引状态 | `rps.community` |
+| `/rps community update` | 立即拉取一次远程索引并按需下载 | `rps.community` |
 
 `rps.use` 默认对所有玩家开放，因为默认提示语里的「点这里重新下载」需要玩家能执行
 `/rps push`。其余节点默认 `op`，可用权限插件逐项分配；`rps.admin` 是
@@ -281,29 +298,65 @@ Minecraft 原版协议没有资源包增量下载：客户端只会对整包发�
 `/rps check` 会扫描 `plugins/*/config.yml` 里疑似 `resource-pack` / `pack-url` /
 `send-on-join` 的配置并给出警告。
 
-## 社区资源包与自动发版
+## 社区资源包与受控发行
 
-`packs/` 是社区资源包目录，每个子目录一个包：
+`packs/` 是社区资源包目录。每个子目录一个包，并且必须声明它和哪个插件、以什么关系绑定：
 
 ```text
 packs/
-  seasonal/
-    pack.yml          # id / name / priority / license / pack_format
-    pack.mcmeta
-    assets/<namespace>/...
+└── seasonal/
+    ├── pack.yml          # 元数据，不会打进客户端 zip
+    ├── pack.mcmeta
+    ├── pack.png          # 可选图标
+    └── assets/<namespace>/...
 ```
 
-- 提 PR 修改 `packs/`：`pack-pr` 工作流用基础分支的脚本校验结构、路径穿越、大小与
-  条目数，合并成预览包并以置顶评论给出 sha1、条目数与冲突列表；PR 代码不会被运行。
-- 合并进 `main`：`auto-release` 自动构建插件 jar 与 `community-pack.zip`，
-  补丁版本号 +1，创建 Release 并附上报告。
-- 服务器使用：下载 `community-pack.zip` 放到插件数据目录，在 `sources` 里登记：
+绑定字段是扁平 YAML，不接受嵌套：
 
-  ```yaml
-  - id: "community/seasonal"
-    path: "plugins/Resource Pack Service/community-pack.zip"
-    priority: 10
-  ```
+| 字段 | 作用 |
+| --- | --- |
+| `plugin` | 绑定的插件 id；standalone 写 `universal` |
+| `relation` | `official` / `addon` / `patch` / `integration` / `standalone` |
+| `release` | `auto` / `manual` / `none` |
+| `also` | `integration` 同时服务的其它插件 |
+| `variant` / `default` | 同一插件的互斥变体组与默认项 |
+| `version` | 内容版本；包内文件有实质变化时递增，便于审计与排查 |
+| `minecraft` | 兼容的 Minecraft 版本范围，支持空格 AND、逗号 OR；留空表示不限 |
+| `requires` | 依赖插件的版本范围，运行期按已安装插件版本判断 |
+| `priority` | 合并层序，越大越靠上 |
+
+- 提 PR：`pack-pr` 用基础分支的脚本校验目录、绑定字段、路径穿越、大小与条目数，生成预览目录，把绑定表、sha1、冲突与未纳入原因写进置顶评论；PR 代码不会被执行。
+- 合并进 `main`：不会因为“多了一个包”就自动发行。`auto-release` 先做发行计划：新增的 `release: auto` 包必须由维护者手动触发一次并在 `force_packs` 里点名批准；只新增包、没有代码变更时发行计划返回 `false`，后续构建与发布步骤全部跳过。代码有变更时只发行插件 jar，不生成 `community-packs.zip`、不部署 Pages；包也有变更或 `force_packs` 点名时才走资源包发行，未批准的包不进入 `community-packs.zip`。已有包被删除或改为 `release: none` 时，发行计划会把索引标为需要更新，并发布一个可能为空的索引，避免远程继续提供已撤下的包。
+- 已批准且 `release: auto` 的包，后续改动才会自动进入发行；`release: manual` 只在手动发行时进入，`release: none` 只做校验并在报告里列为未纳入，不进入预览包或发行包。
+- 离线使用：从 Release 下载 `community-packs.zip`，解压到插件数据目录下的 `community/`：
+
+```text
+plugins/Resource Pack Service/community/
+├── manifest.json
+├── companion-base.zip
+├── bettermodel-base.zip
+└── ...
+```
+
+每个包的文件名必须是 `<id>.zip`，`manifest.json` 里的 `packs` 记录每个包的 `plugin`、`relation`、`version`、`minecraft`、`format_min` / `format_max` 等字段。
+
+- 托管索引：Auto Release 会把本次已批准的资源包同步发布到 GitHub Pages，索引地址为
+  `https://nekomc-official.github.io/Resource-Pack-Service/community-index.json`。索引里的 `file` 是相对路径，指向内容寻址的 `objects/<sha1>.zip`。
+- 远程消费：把 `community.remote.enabled` 设为 `true`（默认关闭）。服务端会定时拉取索引，先按本机已安装插件与 Minecraft 版本筛选，有效的 `community.pack-format` 非 0 时再按包格式过滤（留空会沿用 `merge.pack-format` 的具体数字）；随后按 sha1 增量下载到社区目录，只有全部下载与校验都通过才整体切换到新清单，任一环节失败都保留旧清单与旧包。`/rps community update` 可立即检查一次。
+
+  然后确认配置：
+
+```yaml
+community:
+  enabled: true
+  dir: "plugins/Resource Pack Service/community"
+  priority: 0
+  remote:
+    enabled: true
+    index-url: "https://nekomc-official.github.io/Resource-Pack-Service/community-index.json"
+```
+
+  社区包不需要写进 `sources`。服务启动、`/rps reload` 以及插件启停时都会重新计算绑定：只纳入声明插件已安装并启用的包，`addon` / `patch` 还要求同插件的 `official` 也在候选里，`integration` 要求主插件与 `also` 里每个插件都满足条件。被跳过的包与原因会写进日志，`/rps status` 与 `/rps list` 可核对。
 
 详见 [packs/README.md](packs/README.md) 与 [docs/ci.md](docs/ci.md)。
 
@@ -336,10 +389,12 @@ src/main/java/moe/nekomc/resourcepack/
   delivery/                        HTTP 出口、进服推送、回执、sha1 工具
   merge/                           rps-pack 进程调用、内置二进制解出
   pack/                            Host / HostStatus / PackSnapshot / EntryManifest
+                                   PackConflictScanner / CommunityPack / CommunitySelection
+                                   CommunitySkip / SelectionContext
 src/main/kotlin/moe/nekomc/resourcepack/
   config/ core/ merge/ pack/ watch/ command/
 rust/rps-pack/                     Rust 合并器与集成测试
-tools/packs.py                     社区资源包校验、打包、合并
+tools/packs.py                     社区资源包校验、打包、bundle 与索引生成
 packs/                             社区资源包
 ```
 
@@ -354,7 +409,7 @@ packs/                             社区资源包
 ## 当前状态
 
 - 合成、内置 HTTP、进服推送、回执、权限、体检、社区资源包流水线均已落地。
-- Java 36 项测试、Rust 14 项集成测试；`./gradlew build` 与 `cargo test` 通过。
+- Java 76 项测试、Rust 14 项集成测试、Python 27 项绑定测试；`./gradlew build`、`cargo test` 与 `python -m unittest discover -s tools` 通过。
 - 尚未做真实 Folia 服务端的端到端联调；首次部署建议在 preflight 副本上验证
   `/rps status`、进服推送与拒绝回执。
 

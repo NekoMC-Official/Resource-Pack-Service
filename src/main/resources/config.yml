@@ -35,6 +35,26 @@ delivery:
     # 公网地址；填了就以它为准，适合放在反向代理后面
     public-url: ""
 
+community:
+  # 社区资源包目录：由发布包里的 community-packs.zip 解压得到
+  enabled: true
+  dir: "plugins/Resource Pack Service/community"
+  # 社区包在合成时的层序偏移；具体包的 priority 会叠加在它上面
+  priority: 0
+  # 服务端 Minecraft 版本（如 1.21.8）；空串表示不额外限制版本，由各包的 minecraft 范围决定
+  minecraft: ""
+  # 服务端资源包格式；留空沿用 merge.pack-format 的具体数字，0 表示不按格式过滤
+  pack-format: ""
+  # 远程索引：从 GitHub Pages 拉取社区包清单，只下载本机已安装插件对应的包
+  remote:
+    enabled: false
+    index-url: "https://nekomc-official.github.io/Resource-Pack-Service/community-index.json"
+    interval-minutes: 60
+    timeout-ms: 30000
+    max-pack-bytes: 67108864
+    require-https: true
+    pin-sha1: ""
+
 sources:
   - id: "bettermodel/base"
     enabled: true

@@ -35,32 +35,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust/rps-pack
-
-      - name: Build merger
-        run: cargo build --release --manifest-path rust/rps-pack/Cargo.toml
-
       - name: Validate packs
         id: build
         continue-on-error: true
         run: python tools/packs.py build --root pr/packs --out build/packs
 
-      - name: Merge packs
-        id: merge
+      - name: Bundle preview
+        id: bundle
         if: steps.build.outcome == 'success'
         continue-on-error: true
         run: >
-          python tools/packs.py merge
+          python tools/packs.py bundle
           --packs build/packs
-          --binary rust/rps-pack/target/release/rps-pack
-          --out build/community-pack.zip
-          --report build/community-pack.report.json
+          --out build/community-packs.zip
           --summary build/pack-summary.md
 
       - name: Ensure summary
@@ -82,13 +69,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: community-pack-preview
+          name: community-packs-preview
           path: |
-            build/community-pack.zip
-            build/community-pack.report.json
+            build/community-packs.zip
             build/pack-summary.md
           if-no-files-found: warn
 
       - name: Fail when validation failed
-        if: steps.build.outcome == 'failure' || steps.merge.outcome == 'failure'
+        if: steps.build.outcome == 'failure' || steps.bundle.outcome == 'failure'
         run: exit 1

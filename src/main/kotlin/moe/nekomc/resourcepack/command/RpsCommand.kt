@@ -5,7 +5,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
 import java.util.Properties
-import moe.nekomc.resourcepack.ResourcePackServicePlugin
 import moe.nekomc.resourcepack.pack.PackConflictScanner
 import moe.nekomc.resourcepack.pack.PackSnapshot
 import net.kyori.adventure.text.minimessage.MiniMessage
@@ -20,9 +19,9 @@ import org.bukkit.entity.Player
  *
  * 只做编排：读发布器快照、调下发器、把结果排版成消息；所有副作用都在别的类里。
  */
-class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecutor, TabCompleter {
+class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompleter {
 
-    private val subcommands = listOf("status", "list", "build", "reload", "push", "check", "diff")
+    private val subcommands = listOf("status", "list", "build", "reload", "push", "check", "diff", "community")
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<String>): Boolean {
         if (!sender.hasPermission("rps.use")) {
@@ -51,6 +50,7 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
             "push" -> push(sender, args)
             "check" -> check(sender)
             "diff" -> diff(sender)
+            "community" -> community(sender, args)
             else -> help(sender)
         }
         return true
@@ -73,6 +73,7 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
         sender.sendMessage(render(PackMessages.field("合成引擎", plugin.publisher()?.engineLabel() ?: "未就绪")))
         sender.sendMessage(render(PackMessages.field("来源数量", plugin.registry()?.all()?.size?.toString() ?: "0")))
         sender.sendMessage(render(PackMessages.field("变更推送", describePushMode(plugin.config().pushMode()))))
+        sender.sendMessage(render(PackMessages.field("社区资源包", communitySummary())))
         val building = plugin.publisher()?.building() == true
         sender.sendMessage(render(PackMessages.field("当前状态", if (building) "正在合成" else "空闲")))
         if (snapshot.error().isNotBlank()) {
@@ -82,22 +83,50 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
 
     private fun list(sender: CommandSender) {
         val sources = plugin.registry()?.ordered().orEmpty()
-        if (sources.isEmpty()) {
+        val community = plugin.publisher()?.communitySources().orEmpty()
+        if (sources.isEmpty() && community.isEmpty()) {
             sender.sendMessage(render(PackMessages.warn("还没有登记任何来源，可以用 API 注册，或写进 config.yml 的 sources")))
             return
         }
-        sender.sendMessage(render(PackMessages.info("已登记 " + sources.size + " 个来源")))
+        sender.sendMessage(render(PackMessages.info("已登记 " + (sources.size + community.size) + " 个来源")))
         for (source in sources) {
             val state = if (source.enabled()) "启用" else "停用"
             sender.sendMessage(
                 render(
                     PackMessages.field(
                         source.id(),
-                        state + " · 优先级 " + source.priority() + " · " + source.file()
+                        state + " · 优先级 " + source.priority() + versionSuffix(source.version())
+                            + " · " + source.file()
                     )
                 )
             )
         }
+        for (source in community) {
+            sender.sendMessage(
+                render(
+                    PackMessages.field(
+                        source.id(),
+                        "启用 · 社区包 · 优先级 " + source.priority() + versionSuffix(source.version())
+                            + " · " + source.file()
+                    )
+                )
+            )
+        }
+    }
+
+    /** 来源声明了版本号时补一段展示文本，未声明就什么都不加。 */
+    private fun versionSuffix(version: String?): String {
+        val label = versionLabel(version)
+        return if (label.isEmpty()) "" else " · " + label
+    }
+
+    private fun versionLabel(version: String?): String {
+        val text = version?.trim().orEmpty()
+        if (text.isEmpty()) {
+            return ""
+        }
+        val already = text.length > 1 && (text[0] == 'v' || text[0] == 'V') && text[1].isDigit()
+        return if (already) text else "v" + text
     }
 
     private fun build(sender: CommandSender) {
@@ -139,7 +168,7 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
                 return
             }
             var pushed = 0
-            for (player in plugin.server.onlinePlayers) {
+            for (player in plugin.server().onlinePlayers) {
                 pushed += delivery.push(player.uniqueId, force)
             }
             sender.sendMessage(render(PackMessages.ok("已向 " + pushed + " 名在线玩家推送" + if (force) "（强制）" else "")))
@@ -152,7 +181,7 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
                 return
             }
         }
-        val target: Player? = plugin.server.getPlayerExact(name)
+        val target: Player? = plugin.server().getPlayerExact(name)
         if (target == null) {
             sender.sendMessage(render(PackMessages.error("找不到在线玩家：" + name)))
             return
@@ -181,9 +210,9 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
             }
         }
         checkServerProperties(sender)
-        val pluginsDir = plugin.dataFolder.toPath().toAbsolutePath().parent
+        val pluginsDir = plugin.dataFolder().toAbsolutePath().parent
         if (pluginsDir != null) {
-            val findings = PackConflictScanner.scan(pluginsDir, plugin.dataFolder.name, 10)
+            val findings = PackConflictScanner.scan(pluginsDir, plugin.dataFolder().fileName.toString(), 10)
             if (findings.isEmpty()) {
                 sender.sendMessage(render(PackMessages.ok("没有发现别的插件自己配资源包地址")))
             } else {
@@ -200,11 +229,19 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
                 }
             }
         }
+        if (plugin.config().communityEnabled()) {
+            val community = plugin.publisher()?.communitySources().orEmpty()
+            if (community.isEmpty()) {
+                sender.sendMessage(render(PackMessages.warn("社区资源包目录没有可加载的包：" + plugin.config().communityDir())))
+            } else {
+                sender.sendMessage(render(PackMessages.ok("社区资源包已按已安装插件纳入 " + community.size + " 个")))
+            }
+        }
         sender.sendMessage(render(PackMessages.info("客户端每次收到 v 变化的地址才会重新下载，先确认 port 对外可达")))
     }
 
     private fun checkServerProperties(sender: CommandSender) {
-        val root = plugin.server.worldContainer.toPath().toAbsolutePath().normalize()
+        val root = plugin.server().worldContainer.toPath().toAbsolutePath().normalize()
         val file: Path = root.resolve("server.properties")
         if (!Files.isRegularFile(file)) {
             sender.sendMessage(render(PackMessages.warn("找不到 server.properties：" + file)))
@@ -241,6 +278,28 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
         }
     }
 
+    private fun community(sender: CommandSender, args: Array<String>) {
+        val config = plugin.config()
+        sender.sendMessage(render(PackMessages.info("社区资源包远程索引")))
+        sender.sendMessage(render(PackMessages.field("状态", plugin.communityRemoteStatus())))
+        sender.sendMessage(render(PackMessages.field("本地目录", config.communityDir().toString())))
+        val loaded = plugin.publisher()?.communitySources().orEmpty().size
+        sender.sendMessage(render(PackMessages.field("已纳入", loaded.toString() + " 个")))
+        if (args.size >= 2 && args[1].equals("update", ignoreCase = true)) {
+            if (!config.communityRemoteEnabled()) {
+                sender.sendMessage(render(PackMessages.warn("远程索引未启用：先设置 community.remote.enabled: true")))
+                return
+            }
+            if (plugin.updateCommunity(true)) {
+                sender.sendMessage(render(PackMessages.ok("已开始检查远程索引，完成后会自动重建合成包")))
+            } else {
+                sender.sendMessage(render(PackMessages.warn("更新器还没就绪，稍后再试")))
+            }
+        } else {
+            sender.sendMessage(render("<gray>用法：/rps community [update]"))
+        }
+    }
+
     private fun help(sender: CommandSender) {
         sender.sendMessage(render(PackMessages.info("/rps 命令")))
         val entries = listOf(
@@ -250,7 +309,8 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
             "reload" to "重载配置并重新合成",
             "push" to if (sender is Player) "重新下载资源包给自己；带玩家名则推给别人" else "给在线玩家或指定玩家推送",
             "check" to "检查地址、端口与配置冲突",
-            "diff" to "对比本次与上次的条目差异"
+            "diff" to "对比本次与上次的条目差异",
+            "community" to "社区包远程索引；update 立即检查"
         )
         for ((sub, description) in entries) {
             if (canUseSub(sender, sub)) {
@@ -266,6 +326,15 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
         return sub == "help" || sender.hasPermission("rps." + sub) || sender.hasPermission("rps.admin")
     }
 
+    private fun communitySummary(): String {
+        val config = plugin.config()
+        if (!config.communityEnabled()) {
+            return "未启用"
+        }
+        val sources = plugin.publisher()?.communitySources().orEmpty()
+        return sources.size.toString() + " 个（" + config.communityDir() + "）"
+    }
+
     private fun describePushMode(mode: String): String = when (mode.lowercase(Locale.ROOT)) {
         "none" -> "none（只落盘，不打扰玩家）"
         "force" -> "force（强制重推在线玩家）"
@@ -278,11 +347,14 @@ class RpsCommand(private val plugin: ResourcePackServicePlugin) : CommandExecuto
         if (args.size == 1) {
             return subcommands.filter { canUseSub(sender, it) }
         }
+        if (args.size == 2 && args[0].equals("community", ignoreCase = true)) {
+            return listOf("status", "update")
+        }
         if (args.size == 2 && args[0].equals("push", ignoreCase = true)) {
             if (!sender.hasPermission("rps.push") && !sender.hasPermission("rps.admin")) {
                 return listOf("force")
             }
-            val names = plugin.server.onlinePlayers.map { it.name }
+            val names = plugin.server().onlinePlayers.map { it.name }
             return names + "force"
         }
         return emptyList()

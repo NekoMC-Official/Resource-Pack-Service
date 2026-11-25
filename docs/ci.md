@@ -5,8 +5,8 @@
 ## CI（`ci.yml`）
 
 - 触发：推送到 `main`、任意 Pull Request、手动 `workflow_dispatch`。
-- 环境：`ubuntu-latest` + Zulu JDK 26 + Rust stable。
-- 步骤：`cargo test` → `cargo build --release` → `./gradlew build`（通过 `RPS_PACK_BIN` 指向刚编出的合并器）→ 上传 `resource-pack-service.jar`。
+- 环境：`ubuntu-latest` + Python 3.12 + Zulu JDK 26 + Rust stable。
+- 步骤：`python -m unittest discover -s tools`（绑定选择与变体规则）→ `cargo test` → `cargo build --release` → `./gradlew build`（通过 `RPS_PACK_BIN` 指向刚编出的合并器）→ 上传 `resource-pack-service.jar`。
 - 构建机是 Linux，所以产物里的内置合并器是 **linux-x86_64**，可直接部署到 Linux 服务端。
 
 ## Release（`release.yml`）
@@ -65,20 +65,28 @@ git push origin v0.1.0
 
 - 触发：PR 改动 `packs/**`、`tools/packs.py` 或本工作流自身。
 - 使用 `pull_request_target` 取得写评论权限，但**不执行 PR 里的任何代码**：基础分支脚本负责校验，PR 内容只当作数据读取。
-- 步骤：编译 `rps-pack` → 校验并打包 `packs/` → 合并 → 把结果作为置顶评论更新到 PR（构建失败也会评论错误）→ 上传预览产物。
-- 校验内容：`pack.yml` 必填项、id 与目录名一致、`pack.mcmeta` 合法、路径穿越与符号链接、条目数与解压体积上限、命名空间存在。
+- 步骤：用基础分支脚本校验并打包 `packs/` → 按绑定关系生成预览目录 → 把绑定表、sha1、冲突与未纳入原因作为置顶评论更新到 PR（校验失败也会评论错误）→ 上传预览产物。
+- 校验内容：`pack.yml` 的 `plugin` / `relation` / `release` / `also` / `variant` / `default` / `version` / `minecraft` / `requires`，id 与目录名一致，`pack.mcmeta` 合法且能推导出 `format_min` / `format_max`，路径穿越与符号链接，条目数与解压体积上限，命名空间存在。
+- 绑定不完整或变体冲突的包不会进入预览目录，原因会写进 PR 评论。
 - PR 分支的 zip 与合并结果只作为 Actions 产物，不会进入仓库，也不会自动发行。
 
 ## Auto Release（`auto-release.yml`）
 
-- 触发：`main` 上改动 `packs/**`、`src/**`、`rust/**`、`build.gradle.kts` 或 `tools/packs.py`；也可手动触发。
-- 机器人：`github-actions[bot]`，使用仓库自带 `GITHUB_TOKEN`，不需要额外 Secrets。
+- 触发：`main` 上改动 `packs/**`、`src/**`、`rust/**`、`build.gradle.kts`、`settings.gradle.kts`、`tools/packs.py` 或 `auto-release.yml` 自身；也可手动触发。
+- 发行计划：`tools/packs.py plan` 以最近 `v*` 标签为基线，用 `git cat-file` 判断包在上个版本是否已存在，用 `git diff` 判断 `src`、`rust`、构建脚本等代码路径是否有变更。
+- 新包闸门：新增的 `release: auto` 包不会自动批准；维护者必须手动触发工作流，并在 `force_packs` 输入里点名一次。只新增包、没有代码变更时 `should_release=false`，后续构建与发布步骤全部跳过，不会创建版本。
+- 打包：只把 `approved-packs.txt` 里的包传给 `packs.py bundle --only`；未批准、未点名的包不会进入 `community-packs.zip`。如果批准集合的绑定关系不完整（例如 addon 缺同插件 official），工作流直接失败。
+- 包变更闸门：`plan` 额外输出 `packs_changed`（`force_packs` 点名、已批准包内容变更、新批准包，或上个标签里的包被删除/撤出时为 true）。为 false 时只发插件 jar，跳过 `community-packs.zip`、索引上传与 Pages 部署，发布产物只有 jar。
+- 版本闸门：已发行包的内容文件有改动时，`pack.yml` 的 `version` 必须严格大于上一个 `v*` 标签里的同 id 包；否则发行计划失败，避免内容变了但客户端与缓存仍认为是同一版。
+- 托管索引：同一个批准集合会传给 `packs.py index --only`，生成 `community-index.json` 与 `objects/<sha1>.zip`，上传为 Pages artifact 并部署到 `https://nekomc-official.github.io/Resource-Pack-Service/`。没有已批准包但发生撤包时，仍会生成空索引并部署，避免远程继续下载已撤下的包。未批准的包不会出现在索引里，因此不会因为合并进 `main` 就对外可用。
+- Pages：仓库的 Pages Source 必须设为 GitHub Actions；工作流需要 `pages: write` 与 `id-token: write`。
+- 服务端消费：把 `community.remote.enabled` 设为 `true`，插件会定时拉取索引，只下载本机已安装插件对应的包，全部下载与 sha1 校验通过后才整体切换 `manifest.json`，失败保留旧清单与旧包；`/rps community update` 可立即检查。离线部署仍可用 `community-packs.zip`。
 - 版本：取最近 `v*` 标签后补丁号加一；还没有标签时从 `v0.1.0` 开始。发行说明列出上次标签以来的提交与资源包报告。
-- 产物：Linux 版插件 jar；仓库里有资源包时再加 `community-pack.zip`、合并报告与 `pack-summary.md`。
+- 产物：Linux 版插件 jar；有已批准资源包时再加 `community-packs.zip`、`pack-summary.md` 与 `community-index.json`；只有撤包时只更新索引，不生成 `community-packs.zip`。索引会部署到 Pages。
 - 跳过：提交信息含 `[skip release]`，或提交者是 Dependabot。
 - 循环保护：机器人用 `GITHUB_TOKEN` 创建标签与 Release 不会再次触发工作流；手动推 `v*` 标签仍走原来的 `release.yml` 双平台矩阵。
 
-> 自动发行只负责构建与发布，不会部署到服务器；部署继续走 `deploy.yml` 的手动投递。
+自动发行只负责构建与发布，不会部署到服务器；部署继续走 `deploy.yml` 的手动投递。
 
 ## CodeQL（`codeql.yml`）
 
