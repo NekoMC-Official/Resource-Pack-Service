@@ -489,13 +489,6 @@ packs/                             社区资源包
 - [packs/README.md](packs/README.md)：社区资源包规范
 - [CONTRIBUTING.md](CONTRIBUTING.md)：DCO、分支、测试与评审
 
-## 当前状态
-
-- 合成、内置 HTTP、进服推送、回执、权限、体检、社区资源包流水线均已落地。
-- Java 92 项测试（19 个测试类）、Rust 26 项（19 项合并集成 + 2 项 mcmeta + 5 项单元）、Python 27 项绑定测试；`./gradlew build`、`cargo test` 与 `python -m unittest discover -s tools` 通过。
-- 尚未做真实 Folia 服务端的端到端联调；首次部署建议在 preflight 副本上验证
-  `/rps status`、进服推送与拒绝回执。
-
 ## 贡献
 
 采用 DCO 1.1，提交时加 `-s`：`git commit -s`。不需要签 CLA。细节见
