@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use rps_pack::{merge, Policy, Request, Source};
+use rps_pack::{merge, AssetKind, ConflictMode, Policy, Request, Severity, Source};
 
 fn work(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -185,6 +185,14 @@ fn two_layer_override_conflict() {
     assert_eq!(conflict.path, path);
     assert_eq!(conflict.winner, "high");
     assert_eq!(conflict.losers, vec!["low".to_string()]);
+    assert_eq!(conflict.kind, AssetKind::Model);
+    assert_eq!(conflict.severity, Severity::High);
+    assert_eq!(conflict.mode, ConflictMode::Replace);
+    assert_eq!(conflict.winner_priority, 10);
+    assert_eq!(conflict.loser_priorities, vec![0]);
+    assert!(!conflict.same_priority);
+    assert_eq!(conflict.winner_sha1.len(), 40);
+    assert_eq!(report.conflict_summary.high, 1);
     assert_eq!(report.deduped, 0);
     assert_eq!(
         entry(&entries, path),
@@ -241,7 +249,17 @@ fn lang_json_is_deep_merged() {
         &out,
     );
 
-    assert!(report.conflicts.is_empty(), "结构合并不应记为冲突");
+    assert_eq!(report.conflicts.len(), 1, "同一键不同值是语义冲突");
+    let conflict = &report.conflicts[0];
+    assert_eq!(conflict.kind, AssetKind::Lang);
+    assert_eq!(conflict.severity, Severity::Medium);
+    assert_eq!(conflict.mode, ConflictMode::JsonDeep);
+    assert!(
+        conflict.fields.iter().any(|field| field.starts_with("/b:")),
+        "应指出 /b 字段差异: {:?}",
+        conflict.fields
+    );
+    assert_eq!(report.conflict_summary.medium, 1);
     let merged: serde_json::Value =
         serde_json::from_slice(entry(&entries, path).expect("lang 条目存在")).expect("合法 JSON");
     assert_eq!(
@@ -499,4 +517,168 @@ fn missing_mcmeta_without_format_fails() {
         "错误文案应同时点明 pack.mcmeta 与 format: {message}"
     );
     assert!(!out.exists(), "失败时不应留下输出文件");
+}
+
+#[test]
+fn same_size_different_content_is_not_deduped() {
+    let dir = work("same-size");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/texts/same-size.txt";
+    write_source(&low, 46, None, &[(path, b"aaaa".as_slice())]);
+    write_source(&high, 46, None, &[(path, b"bbbb".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let (report, entries) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
+
+    assert_eq!(report.deduped, 0, "大小相同但内容不同不能去重");
+    assert_eq!(report.conflicts.len(), 1);
+    assert_eq!(entry(&entries, path), Some(b"bbbb".as_slice()));
+}
+
+#[test]
+fn same_priority_conflict_is_flagged() {
+    let dir = work("same-priority");
+    let alpha = dir.join("alpha.zip");
+    let beta = dir.join("beta.zip");
+    let path = "assets/minecraft/textures/block/shared.png";
+    write_source(&alpha, 46, None, &[(path, b"alpha".as_slice())]);
+    write_source(&beta, 46, None, &[(path, b"beta".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let (report, _) = merge_ok(
+        &request(vec![source("alpha", &alpha, 5), source("beta", &beta, 5)]),
+        &dir,
+        &out,
+    );
+
+    assert_eq!(report.conflicts.len(), 1);
+    let conflict = &report.conflicts[0];
+    assert_eq!(conflict.kind, AssetKind::Texture);
+    assert_eq!(conflict.winner, "beta", "同优先级按请求顺序后写覆盖");
+    assert_eq!(conflict.losers, vec!["alpha".to_string()]);
+    assert_eq!(conflict.winner_priority, 5);
+    assert_eq!(conflict.loser_priorities, vec![5]);
+    assert!(conflict.same_priority, "同优先级应显式标记，便于区分误冲突");
+}
+
+#[test]
+fn font_same_id_reports_json_conflict() {
+    let dir = work("font-conflict");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/font/default.json";
+    write_source(
+        &low,
+        46,
+        None,
+        &[(path, br#"{"providers":[{"id":"glyph","type":"bitmap","file":"low.png"}]}"#.as_slice())],
+    );
+    write_source(
+        &high,
+        46,
+        None,
+        &[(path, br#"{"providers":[{"id":"glyph","type":"bitmap","file":"high.png"},{"id":"extra","type":"space"}]}"#.as_slice())],
+    );
+    let out = dir.join("out.zip");
+
+    let (report, entries) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
+
+    assert_eq!(report.conflicts.len(), 1);
+    let conflict = &report.conflicts[0];
+    assert_eq!(conflict.kind, AssetKind::Font);
+    assert_eq!(conflict.severity, Severity::Medium);
+    assert_eq!(conflict.mode, ConflictMode::JsonConcat);
+    assert!(
+        conflict.fields.iter().any(|field| field.contains("[id=glyph]")),
+        "应指出同 id 定义差异: {:?}",
+        conflict.fields
+    );
+    let merged: serde_json::Value =
+        serde_json::from_slice(entry(&entries, path).expect("font 条目存在")).expect("合法 JSON");
+    assert_eq!(
+        merged["providers"].as_array().map(Vec::len),
+        Some(3),
+        "不同定义仍按高优先在前拼接"
+    );
+}
+#[test]
+fn three_layers_accumulate_losers() {
+    let dir = work("three-layers");
+    let low = dir.join("low.zip");
+    let mid = dir.join("mid.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/textures/block/stone.png";
+    write_source(&low, 64, None, &[(path, b"low".as_slice())]);
+    write_source(&mid, 64, None, &[(path, b"mid".as_slice())]);
+    write_source(&high, 64, None, &[(path, b"high".as_slice())]);
+    let out = dir.join("out.zip");
+
+    let (report, _) = merge_ok(
+        &request(vec![
+            source("low", &low, 0),
+            source("mid", &mid, 5),
+            source("high", &high, 10),
+        ]),
+        &dir,
+        &out,
+    );
+
+    assert_eq!(report.conflicts.len(), 1);
+    let conflict = &report.conflicts[0];
+    assert_eq!(conflict.winner, "high");
+    assert_eq!(conflict.winner_priority, 10);
+    assert_eq!(conflict.losers.len(), 2);
+    assert!(conflict.losers.contains(&"low".to_string()));
+    assert!(conflict.losers.contains(&"mid".to_string()));
+    assert_eq!(conflict.loser_priorities.len(), 2);
+    assert!(conflict.loser_priorities.contains(&5));
+    assert!(conflict.loser_priorities.contains(&0));
+    assert_eq!(report.conflict_summary.high, 1);
+}
+
+#[test]
+fn json_conflict_fields_are_capped() {
+    let dir = work("json-field-cap");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    let path = "assets/minecraft/lang/en_us.json";
+    let build = |value: &str| {
+        let mut map = serde_json::Map::new();
+        for index in 0..60 {
+            map.insert(
+                format!("k{index}"),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+        serde_json::to_vec(&serde_json::Value::Object(map)).expect("序列化 lang fixture")
+    };
+
+    let low_json = build("low");
+    let high_json = build("high");
+    write_source(&low, 64, None, &[(path, low_json.as_slice())]);
+    write_source(&high, 64, None, &[(path, high_json.as_slice())]);
+    let out = dir.join("out.zip");
+
+    let (report, _) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
+
+    assert_eq!(report.conflicts.len(), 1);
+    let conflict = &report.conflicts[0];
+    assert_eq!(conflict.kind, AssetKind::Lang);
+    assert_eq!(conflict.severity, Severity::Medium);
+    assert_eq!(conflict.mode, ConflictMode::JsonDeep);
+    assert_eq!(conflict.fields.len(), 50);
+    assert!(conflict.fields.iter().all(|field| field.starts_with('/')));
 }

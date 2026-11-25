@@ -42,6 +42,7 @@ Kotlin（编排）
   core/SourceRegistry         来源表与层序
   core/StateStore             sha1 → 世代号
   pack/PackPublisher          异步单飞、落盘、换代、通知
+  pack/ConflictReport         冲突明细持久化与默认过滤
   pack/RegisteredSources      ResourcePackService 的实现
   pack/CommunitySelector      绑定、版本、format、requires 与变体选择
   pack/VersionRange           Minecraft / 插件版本范围解析
@@ -144,6 +145,11 @@ API 来源在 `/rps reload` 后由 `RegisteredSources.reapply` 重新投回新�
 | 同上，`policy=strict` | 整次构建失败，报告冲突路径与来源 |
 | 目录条目 | 忽略，只处理文件 |
 
+判重先比大小与 CRC32 预筛，再用 SHA-1 确认；三者全等才算同一份内容。冲突按路径分类为
+`texture` / `texture-meta` / `model` / `blockstate` / `item-model`（高）、
+`lang` / `sound` / `font` / `atlas`（中）、`shader` / `other`（低），`pack.png` 与
+`pack.mcmeta` 属于元数据，不记冲突。
+
 ### 5.2 可合并 JSON
 
 以下路径不是“整文件覆盖”，而是按键深合并：
@@ -155,6 +161,11 @@ API 来源在 `/rps reload` 后由 `RegisteredSources.reapply` 重新投回新�
 
 对象递归合并；标量由高层覆盖；数组按“高层在前”拼接后去重。
 解析失败时该文件退化为普通条目，按冲突策略取一份，并在报告里给出警告。
+
+深合并前会先比较两侧共同键；标量或数组条目定义不同的字段记为 `json-deep` /
+`json-concat` 冲突，但仍写出合并结果。冲突明细最多保留 5000 条，字段说明最多 50 条、
+单条 120 字符；`/rps conflicts` 默认只展示高严重度，`all` 展示全部，报告同时写入
+`conflicts.json`。
 
 ### 5.3 pack.mcmeta
 
@@ -185,9 +196,10 @@ registry.ordered()
   → 检查来源文件存在
   → rps-pack merge --request - --output merged.staging.zip
   → 校验大小、算 sha1
-  → StateStore.commit(sha1) 决定世代号是否递增
   → Files.move(staging, merged.zip, REPLACE_EXISTING)
+  → StateStore.commit(sha1) 决定世代号是否递增
   → EntryManifest.rotateAndWrite()
+  → ConflictReport.write(conflicts.json)
   → 生成 url（base + ?v=世代号）
   → PackSnapshot 原子替换
   → 若内容变化，按 push.mode 通知
@@ -234,7 +246,7 @@ registry.ordered()
 
 | 节点 | 默认 | 说明 |
 | --- | --- | --- |
-| `rps.use` | true | 进入 `/rps`；玩家可 `/rps push` 给自己 |
+| `rps.use` | true | 进入 `/rps`；玩家可 `/rps push` 给自己；`/rps conflicts` 只需此权限 |
 | `rps.status` / `list` / `diff` / `check` | op | 查看类 |
 | `rps.build` / `reload` / `push` | op | 管理类 |
 | `rps.admin` | op | build/reload/push/check 的集合 |
@@ -260,10 +272,10 @@ registry.ordered()
 
 ## 10. 测试
 
-- Java：`./gradlew test`，76 项，覆盖 API 注册表与 invalidate、社区包选择与版本范围、索引解析、远程更新与校验、URL 拼接、HTTP 出口、内置二进制解出、Rust 合并器集成、条目清单、插件描述符、配置体检扫描等。
-- Rust：`cd rust/rps-pack && cargo test`，14 项集成测试，覆盖层序、冲突策略、
-  JSON 深合并、mcmeta 交集、确定性、zip slip、缺失 mcmeta 等。
-- Python：`python -m unittest discover -s tools`，24 项，覆盖 official 变体默认、addon/patch 依赖、integration 多插件闭合、release=none、优先级排序、version / minecraft / format 范围解析、索引生成，以及内容变更但 version 未递增时发行计划失败的闸门。
+- Java：`./gradlew test`，81 项，覆盖 API 注册表与 invalidate、社区包选择与版本范围、索引解析、远程更新与校验、URL 拼接、HTTP 出口、内置二进制解出、Rust 合并器集成、冲突报告、条目清单、插件描述符、配置体检扫描等。
+- Rust：`cd rust/rps-pack && cargo test`，24 项（19 项集成 + 5 项单元），覆盖层序、冲突策略、
+  JSON 深合并、mcmeta 交集、确定性、zip slip、缺失 mcmeta、冲突分类与指纹等。
+- Python：`python -m unittest discover -s tools`，27 项，覆盖 official 变体默认、addon/patch 依赖、integration 多插件闭合、release=none、优先级排序、version / minecraft / format 范围解析、索引生成，以及内容变更但 version 未递增时发行计划失败的闸门。
 - CI 在 Ubuntu 上跑 `python -m unittest discover -s tools`、`cargo test` 与 `./gradlew build`，并把合并器路径通过
   `RPS_PACK_BIN` 传给集成测试。
 

@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
 import java.util.Properties
+import moe.nekomc.resourcepack.pack.ConflictReport
 import moe.nekomc.resourcepack.pack.PackConflictScanner
 import moe.nekomc.resourcepack.pack.PackSnapshot
 import net.kyori.adventure.text.minimessage.MiniMessage
@@ -21,7 +22,7 @@ import org.bukkit.entity.Player
  */
 class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompleter {
 
-    private val subcommands = listOf("status", "list", "build", "reload", "push", "check", "diff", "community")
+    private val subcommands = listOf("status", "list", "build", "reload", "push", "check", "diff", "conflicts", "community")
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<String>): Boolean {
         if (!sender.hasPermission("rps.use")) {
@@ -50,6 +51,7 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
             "push" -> push(sender, args)
             "check" -> check(sender)
             "diff" -> diff(sender)
+            "conflicts" -> conflicts(sender, args)
             "community" -> community(sender, args)
             else -> help(sender)
         }
@@ -71,7 +73,7 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
         sender.sendMessage(render(PackMessages.field("构建时间", if (snapshot.builtAt().isBlank()) "无" else snapshot.builtAt())))
         sender.sendMessage(render(PackMessages.field("合成摘要", if (snapshot.summary().isBlank()) "无" else snapshot.summary())))
         sender.sendMessage(render(PackMessages.field("合成引擎", plugin.publisher()?.engineLabel() ?: "未就绪")))
-        sender.sendMessage(render(PackMessages.field("来源数量", plugin.registry()?.all()?.size?.toString() ?: "0")))
+        sender.sendMessage(render(PackMessages.field("来源数量", plugin.registry().all().size.toString())))
         sender.sendMessage(render(PackMessages.field("变更推送", describePushMode(plugin.config().pushMode()))))
         sender.sendMessage(render(PackMessages.field("社区资源包", communitySummary())))
         val building = plugin.publisher()?.building() == true
@@ -82,7 +84,7 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
     }
 
     private fun list(sender: CommandSender) {
-        val sources = plugin.registry()?.ordered().orEmpty()
+        val sources = plugin.registry().ordered()
         val community = plugin.publisher()?.communitySources().orEmpty()
         if (sources.isEmpty() && community.isEmpty()) {
             sender.sendMessage(render(PackMessages.warn("还没有登记任何来源，可以用 API 注册，或写进 config.yml 的 sources")))
@@ -278,6 +280,74 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
         }
     }
 
+    private fun safe(value: String): String = MiniMessage.miniMessage().escapeTags(value)
+
+    private fun conflicts(sender: CommandSender, args: Array<String>) {
+        val all = args.size >= 2 && args[1].equals("all", ignoreCase = true)
+        val report = ConflictReport.read(plugin.config().outputDir())
+        if (report == null) {
+            sender.sendMessage(render(PackMessages.warn("还没有冲突报告：先跑一次 /rps build 重新生成")))
+            return
+        }
+        val visible = ConflictReport.visible(report, all)
+        sender.sendMessage(render(PackMessages.info("资源包冲突")))
+        sender.sendMessage(
+            render(
+                PackMessages.field(
+                    "报告",
+                    report.generatedAt + " · " + report.sha1.take(12) + " · 第 " + report.version + " 版"
+                )
+            )
+        )
+        sender.sendMessage(
+            render(
+                PackMessages.field(
+                    "汇总",
+                    "共 " + report.summary.total + " 条 · 高 " + report.summary.high
+                        + " · 中 " + report.summary.medium + " · 低 " + report.summary.low + (if (report.summary.truncated) " · 明细已截断" else "")
+                )
+            )
+        )
+        if (visible.isEmpty()) {
+            val message = if (all) "没有记录到冲突" else "没有材质、模型或方块状态冲突"
+            sender.sendMessage(render(PackMessages.ok(message)))
+            if (!all) {
+                sender.sendMessage(render("<gray>语言、声音、字体、图集冲突用 /rps conflicts all 查看"))
+            }
+            return
+        }
+        val limit = if (all) 40 else 20
+        for (conflict in visible.take(limit)) {
+            val color = when (conflict.severity) {
+                "high" -> "<red>"
+                "medium" -> "<yellow>"
+                else -> "<gray>"
+            }
+            sender.sendMessage(
+                render(color + "[" + safe(conflict.severity) + "] " + safe(conflict.kind) + " <white>" + safe(conflict.path))
+            )
+            sender.sendMessage(
+                render(
+                    "<gray>胜出 " + safe(conflict.winner) + "(" + conflict.winnerPriority + ") <dark_gray>← "
+                        + conflict.losers.joinToString(", ") { safe(it) }
+                        + (if (conflict.samePriority) "（同优先级）" else "")
+                )
+            )
+            if (conflict.fields.isNotEmpty()) {
+                sender.sendMessage(
+                    render("<gray>字段 " + conflict.fields.take(5).joinToString("; ") { safe(it) })
+                )
+            }
+        }
+        if (visible.size > limit) {
+            sender.sendMessage(
+                render(PackMessages.field("提示", "另有 " + (visible.size - limit) + " 条，完整明细见 conflicts.json"))
+            )
+        } else if (!all) {
+            sender.sendMessage(render("<gray>语言、声音、字体、图集冲突用 /rps conflicts all 查看"))
+        }
+    }
+
     private fun community(sender: CommandSender, args: Array<String>) {
         val config = plugin.config()
         sender.sendMessage(render(PackMessages.info("社区资源包远程索引")))
@@ -310,6 +380,7 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
             "push" to if (sender is Player) "重新下载资源包给自己；带玩家名则推给别人" else "给在线玩家或指定玩家推送",
             "check" to "检查地址、端口与配置冲突",
             "diff" to "对比本次与上次的条目差异",
+            "conflicts" to "看材质、模型等资源冲突；all 查看全部",
             "community" to "社区包远程索引；update 立即检查"
         )
         for ((sub, description) in entries) {
@@ -321,6 +392,9 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
 
     private fun canUseSub(sender: CommandSender, sub: String): Boolean {
         if (sub == "push" && sender is Player) {
+            return true
+        }
+        if (sub == "conflicts") {
             return true
         }
         return sub == "help" || sender.hasPermission("rps." + sub) || sender.hasPermission("rps.admin")
@@ -346,6 +420,9 @@ class RpsCommand(private val plugin: RpsCommandHost) : CommandExecutor, TabCompl
     override fun onTabComplete(sender: CommandSender, command: Command, alias: String, args: Array<String>): List<String> {
         if (args.size == 1) {
             return subcommands.filter { canUseSub(sender, it) }
+        }
+        if (args.size == 2 && args[0].equals("conflicts", ignoreCase = true)) {
+            return listOf("all")
         }
         if (args.size == 2 && args[0].equals("community", ignoreCase = true)) {
             return listOf("status", "update")

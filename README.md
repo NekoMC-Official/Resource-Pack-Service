@@ -39,7 +39,7 @@ zip，合并、版本、缓存、推送、回执全部由本服务统一处理�
 | 编排 | Kotlin 2.4.21（`jvmTarget = 25`） | 配置、注册表、发布器、监听、命令、文案 |
 | 计算 | Rust 2024（serde / serde_json / sha1 / zip） | `rps-pack` 只做合并，随 jar 内置 |
 | 构建 | Gradle 9.9.2 + Shadow 9.6.1 | 产出单个 `resource-pack-service.jar` |
-| 测试 | JUnit 6.1.3 / cargo test / unittest | Java 76 项，Rust 14 项集成测试，Python 27 项绑定测试 |
+| 测试 | JUnit 6.1.3 / cargo test / unittest | Java 81 项，Rust 24 项（19 集成 + 5 单元），Python 27 项绑定测试 |
 | 文本 | Adventure + MiniMessage | 提示语与 `push.notify-message` |
 
 依赖方向是单向的：**Java → Kotlin → Rust**。跨语言边界只传 JDK 类型和 Java record，
@@ -197,6 +197,7 @@ community:
 | `/rps push <玩家>` | 给指定玩家推送 | `rps.push` 或 `rps.admin` |
 | `/rps check` | 检查下载地址、`server.properties`、其它插件的疑似推送配置 | `rps.check` |
 | `/rps diff` | 对比本次与上次的条目差异 | `rps.diff` |
+| `/rps conflicts` | 看材质、模型、方块状态等冲突；`all` 查看语言、声音、字体、图集 | `rps.use` |
 | `/rps community` | 查看社区目录、已纳入数量与远程索引状态 | `rps.community` |
 | `/rps community update` | 立即拉取一次远程索引并按需下载 | `rps.community` |
 
@@ -277,6 +278,8 @@ Minecraft 原版协议没有资源包增量下载：客户端只会对整包发�
    `custom_model_data` 预留材质槽，而不是每次重打整包。
 3. **压体积**：合并时去重、压缩纹理、删掉未引用的文件。
 
+`/rps conflicts` 默认只列材质、模型、方块状态等会直接影响外观的冲突，`/rps conflicts all`
+再看语言、声音、字体与图集；完整明细落在 `plugins/Resource Pack Service/conflicts.json`。
 `/rps diff` 给出条目级变化，用来判断这次改动是否值得让全服重下；`merge.max-bytes`
 防止误把大文件塞进来。真正的增量只能靠客户端 mod，服务端插件做不到。
 
@@ -409,7 +412,7 @@ packs/                             社区资源包
 ## 当前状态
 
 - 合成、内置 HTTP、进服推送、回执、权限、体检、社区资源包流水线均已落地。
-- Java 76 项测试、Rust 14 项集成测试、Python 27 项绑定测试；`./gradlew build`、`cargo test` 与 `python -m unittest discover -s tools` 通过。
+- Java 81 项测试、Rust 24 项（19 集成 + 5 单元）、Python 27 项绑定测试；`./gradlew build`、`cargo test` 与 `python -m unittest discover -s tools` 通过。
 - 尚未做真实 Folia 服务端的端到端联调；首次部署建议在 preflight 副本上验证
   `/rps status`、进服推送与拒绝回执。
 

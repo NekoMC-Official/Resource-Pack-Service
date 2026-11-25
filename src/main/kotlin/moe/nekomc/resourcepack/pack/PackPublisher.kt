@@ -171,6 +171,11 @@ class PackPublisher(private val plugin: PackHost) {
                 withVersion(base, version)
             }
             current.set(PackSnapshot(url, sha1, version, result.bytes(), builtAt, result.summary(), ""))
+            try {
+                ConflictReport.write(outputDir, current.get(), result)
+            } catch (exception: Exception) {
+                plugin.logger().warning("写入冲突报告失败：" + (exception.message ?: exception.javaClass.simpleName))
+            }
             if (delivery == null) {
                 plugin.logger().warning("下发器还没有就绪，本次合成结果不会自动推送")
             } else {

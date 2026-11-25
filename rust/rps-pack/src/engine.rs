@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -16,7 +17,10 @@ use crate::crc::crc32;
 use crate::error::{err, MergeError, Result};
 use crate::jsonmerge;
 use crate::mcmeta;
-use crate::model::{Conflict, Policy, Report, Request};
+use crate::model::{
+    AssetKind, Conflict, ConflictMode, ConflictSource, ConflictSummary, Policy, Report, Request,
+    Severity,
+};
 
 pub const PACK_MC_META: &str = "pack.mcmeta";
 pub const PACK_ICON: &str = "pack.png";
@@ -24,33 +28,109 @@ pub const PACK_ICON: &str = "pack.png";
 /// 压缩级别固定，保证同样输入得到同样字节。
 const DEFLATE_LEVEL: i64 = 6;
 
+/// 报告里最多保留的冲突明细；汇总仍统计全部。
+const MAX_CONFLICT_DETAILS: usize = 5000;
+
+/// 单条冲突最多保留的字段差异；与 jsonmerge 的上限一致。
+const MAX_CONFLICT_FIELDS: usize = 50;
+
 struct Blob {
     bytes: Vec<u8>,
     crc: u32,
     size: u64,
+    sha1: OnceLock<String>,
     /// 层序：0 是最先叠的低层。
     layer: usize,
     source: String,
+    priority: i64,
 }
 
 impl Blob {
-    fn new(bytes: Vec<u8>, layer: usize, source: &str) -> Self {
+    fn new(bytes: Vec<u8>, layer: usize, source: &str, priority: i64) -> Self {
         let crc = crc32(&bytes);
         let size = bytes.len() as u64;
         Blob {
             bytes,
             crc,
             size,
+            sha1: OnceLock::new(),
             layer,
             source: source.to_string(),
+            priority,
         }
+    }
+
+    /// 只在 CRC/大小相同时才计算 SHA-1，避免为每个条目付哈希成本。
+    fn sha1(&self) -> &str {
+        self.sha1.get_or_init(|| {
+            let mut hasher = Sha1::new();
+            hasher.update(&self.bytes);
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
     }
 }
 
-#[derive(Default)]
 struct ConflictState {
-    winner: String,
-    losers: Vec<String>,
+    winner: ConflictSource,
+    losers: Vec<ConflictSource>,
+    kind: AssetKind,
+    mode: ConflictMode,
+    same_priority: bool,
+    fields: Vec<String>,
+}
+
+impl ConflictState {
+    fn new(
+        winner: ConflictSource,
+        kind: AssetKind,
+        mode: ConflictMode,
+        fields: Vec<String>,
+    ) -> Self {
+        ConflictState {
+            winner,
+            losers: Vec::new(),
+            kind,
+            mode,
+            same_priority: false,
+            fields,
+        }
+    }
+
+    /// 语言/声音/字体/图集整文件替换时只算低危；只有同键或同 id 的语义差异才算中危。
+    fn severity(&self) -> Severity {
+        match self.mode {
+            ConflictMode::Replace
+                if matches!(
+                    self.kind,
+                    AssetKind::Lang | AssetKind::Sound | AssetKind::Font | AssetKind::Atlas
+                ) =>
+            {
+                Severity::Low
+            }
+            _ => self.kind.severity(),
+        }
+    }
+
+    fn add_loser(&mut self, loser: ConflictSource) {
+        if loser.id == self.winner.id || self.losers.iter().any(|item| item.id == loser.id) {
+            return;
+        }
+        self.same_priority |= loser.priority == self.winner.priority;
+        self.losers.push(loser);
+    }
+}
+
+fn side_of(blob: &Blob) -> ConflictSource {
+    ConflictSource {
+        id: blob.source.clone(),
+        priority: blob.priority,
+        sha1: blob.sha1().to_string(),
+        bytes: blob.size,
+    }
 }
 
 /// 合并所有来源并写出 zip，返回契约里的报告（不含 ok 之外的诊断）。
@@ -76,16 +156,16 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         let source = &request.sources[index];
         let path = resolve(project_root, &source.path);
         let pack = read_source(&path, &source.id, &mut read_total)?;
-            if let Some(meta) = &pack.mcmeta {
-                ranges.push(mcmeta::interval(meta, &source.id)?);
-            }
+        if let Some(meta) = &pack.mcmeta {
+            ranges.push(mcmeta::interval(meta, &source.id)?);
+        }
         for (name, bytes) in pack.entries {
             let duplicate = insert(
                 &mut entries,
                 &mut conflicts,
                 request,
                 rank,
-                &source.id,
+                source,
                 name,
                 bytes,
                 &mut warnings,
@@ -139,7 +219,7 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         .map_err(|error| MergeError::new(format!("pack.mcmeta 序列化失败: {error}")))?;
     entries.insert(
         PACK_MC_META.to_string(),
-        Blob::new(built_bytes, usize::MAX, "rps-pack"),
+        Blob::new(built_bytes, usize::MAX, "rps-pack", i64::MAX),
     );
 
     warnings.extend(namespace_warnings(&entries));
@@ -155,6 +235,10 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
 
+    let total_conflicts = conflicts.len();
+    let mut conflict_summary = summarize(&conflicts);
+    conflict_summary.truncated = total_conflicts > MAX_CONFLICT_DETAILS;
+
     Ok(Report {
         ok: true,
         sha1: sha1_hex,
@@ -166,15 +250,91 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         format_max,
         conflicts: conflicts
             .into_iter()
-            .map(|(path, state)| Conflict {
-                path,
-                winner: state.winner,
-                losers: state.losers,
-            })
+            .take(MAX_CONFLICT_DETAILS)
+            .map(|(path, state)| into_conflict(path, state))
             .collect(),
+        conflict_summary,
         warnings,
         millis: started.elapsed().as_millis() as u64,
     })
+}
+
+fn summarize(conflicts: &BTreeMap<String, ConflictState>) -> ConflictSummary {
+    let mut summary = ConflictSummary::default();
+    for state in conflicts.values() {
+        summary.total += 1;
+        match state.severity() {
+            Severity::High => summary.high += 1,
+            Severity::Medium => summary.medium += 1,
+            Severity::Low => summary.low += 1,
+        }
+        *summary
+            .by_kind
+            .entry(state.kind.as_str().to_string())
+            .or_insert(0) += 1;
+    }
+    summary
+}
+
+fn into_conflict(path: String, state: ConflictState) -> Conflict {
+    let severity = state.severity();
+    let winner = state.winner;
+    let losers = state.losers;
+    Conflict {
+        path,
+        winner: winner.id,
+        losers: losers.iter().map(|item| item.id.clone()).collect(),
+        kind: state.kind,
+        severity,
+        mode: state.mode,
+        winner_priority: winner.priority,
+        loser_priorities: losers.iter().map(|item| item.priority).collect(),
+        winner_sha1: winner.sha1,
+        loser_sha1s: losers.iter().map(|item| item.sha1.clone()).collect(),
+        same_priority: state.same_priority,
+        fields: state.fields,
+    }
+}
+
+fn note_conflict(
+    conflicts: &mut BTreeMap<String, ConflictState>,
+    name: &str,
+    winner: &Blob,
+    loser: &Blob,
+    kind: AssetKind,
+    mode: ConflictMode,
+    fields: Vec<String>,
+) {
+    let winner_side = side_of(winner);
+    let loser_side = side_of(loser);
+    if let Some(state) = conflicts.get_mut(name) {
+        if state.winner.id != winner_side.id {
+            let previous = std::mem::replace(&mut state.winner, winner_side);
+            state.add_loser(previous);
+            state.kind = kind;
+            state.mode = mode;
+            state.fields.clear();
+        }
+        if !fields.is_empty() {
+            if state.fields.is_empty() {
+                state.fields = fields;
+            } else {
+                for field in fields {
+                    if state.fields.len() >= MAX_CONFLICT_FIELDS {
+                        break;
+                    }
+                    if !state.fields.contains(&field) {
+                        state.fields.push(field);
+                    }
+                }
+            }
+        }
+        state.add_loser(loser_side);
+        return;
+    }
+    let mut state = ConflictState::new(winner_side, kind, mode, fields);
+    state.add_loser(loser_side);
+    conflicts.insert(name.to_string(), state);
 }
 
 /// 把一个来源条目并入累计结果；返回是否命中内容去重。
@@ -184,12 +344,12 @@ fn insert(
     conflicts: &mut BTreeMap<String, ConflictState>,
     request: &Request,
     rank: usize,
-    source_id: &str,
+    source: &crate::model::Source,
     name: String,
     bytes: Vec<u8>,
     warnings: &mut Vec<String>,
 ) -> Result<bool> {
-    let incoming = Blob::new(bytes, rank, source_id);
+    let incoming = Blob::new(bytes, rank, &source.id, source.priority);
     let previous = match entries.remove(&name) {
         Some(previous) => previous,
         None => {
@@ -198,8 +358,11 @@ fn insert(
         }
     };
 
-    // 同名条目 CRC 与大小都一致：内容重复，去重计数，保留先叠进来的那份。
-    if previous.crc == incoming.crc && previous.size == incoming.size {
+    // 大小与 CRC 只做快速预筛；真正判重要求 SHA-1 也一致。
+    if previous.size == incoming.size
+        && previous.crc == incoming.crc
+        && previous.sha1() == incoming.sha1()
+    {
         entries.insert(name, previous);
         return Ok(true);
     }
@@ -210,17 +373,40 @@ fn insert(
         return Ok(false);
     }
 
+    let kind = AssetKind::of(&name);
+    if kind == AssetKind::Metadata {
+        entries.insert(name, incoming);
+        return Ok(false);
+    }
+
     if request.json_merge {
-        if let Some(kind) = jsonmerge::kind_of(&name) {
+        if let Some(merge_kind) = jsonmerge::kind_of(&name) {
             let low = serde_json::from_slice::<Value>(&previous.bytes);
             let high = serde_json::from_slice::<Value>(&incoming.bytes);
             match (low, high) {
                 (Ok(low), Ok(high)) => {
-                    let merged = jsonmerge::merge(kind, low, high);
+                    let fields = jsonmerge::conflicts(merge_kind, &low, &high);
+                    let merged = jsonmerge::merge(merge_kind, low, high);
                     let merged_bytes = serde_json::to_vec(&merged).map_err(|error| {
                         MergeError::new(format!("{name} 合并后序列化失败: {error}"))
                     })?;
-                    entries.insert(name, Blob::new(merged_bytes, rank, source_id));
+                    let merged_blob = Blob::new(merged_bytes, rank, &source.id, source.priority);
+                    let mode = match merge_kind {
+                        jsonmerge::MergeKind::Deep => ConflictMode::JsonDeep,
+                        jsonmerge::MergeKind::Concat => ConflictMode::JsonConcat,
+                    };
+                    if !fields.is_empty() {
+                        note_conflict(
+                            conflicts,
+                            &name,
+                            &merged_blob,
+                            &previous,
+                            kind,
+                            mode,
+                            fields,
+                        );
+                    }
+                    entries.insert(name, merged_blob);
                     return Ok(false);
                 }
                 _ => warnings.push(format!("{name}：JSON 解析失败，退化为按路径覆盖")),
@@ -228,39 +414,37 @@ fn insert(
         }
     }
 
-    // 图标固定取最高层，不参与冲突策略。
-    if name == PACK_ICON {
-        entries.insert(name, incoming);
-        return Ok(false);
-    }
-
     match request.policy {
         Policy::Strict => err(format!(
-            "路径冲突（strict）：{name} 内容不同，来自 {} 与 {source_id}",
-            previous.source
+            "路径冲突（strict）：{name} 内容不同，来自 {} 与 {}",
+            previous.source, source.id
         )),
         Policy::Override => {
-            let state = conflicts.entry(name.clone()).or_default();
-            state.winner = source_id.to_string();
-            push_loser(state, &previous.source);
+            note_conflict(
+                conflicts,
+                &name,
+                &incoming,
+                &previous,
+                kind,
+                ConflictMode::Replace,
+                Vec::new(),
+            );
             entries.insert(name, incoming);
             Ok(false)
         }
         Policy::First => {
-            let state = conflicts.entry(name.clone()).or_default();
-            if state.winner.is_empty() {
-                state.winner = previous.source.clone();
-            }
-            push_loser(state, source_id);
+            note_conflict(
+                conflicts,
+                &name,
+                &previous,
+                &incoming,
+                kind,
+                ConflictMode::Replace,
+                Vec::new(),
+            );
             entries.insert(name, previous);
             Ok(false)
         }
-    }
-}
-
-fn push_loser(state: &mut ConflictState, source_id: &str) {
-    if state.winner != source_id && !state.losers.iter().any(|loser| loser == source_id) {
-        state.losers.push(source_id.to_string());
     }
 }
 

@@ -12,4 +12,7 @@ pub mod model;
 
 pub use engine::merge;
 pub use error::{MergeError, Result};
-pub use model::{Conflict, Policy, Report, Request, Source};
+pub use model::{
+    AssetKind, Conflict, ConflictMode, ConflictSource, ConflictSummary, Policy, Report, Request,
+    Severity, Source,
+};

@@ -1,6 +1,7 @@
 package moe.nekomc.resourcepack.merge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -69,6 +70,33 @@ class RustPackMergerTest {
         assertEquals("test pack", meta.get("description").getAsString());
         assertEquals(46, result.formatMin());
         assertEquals(46, result.formatMax());
+    }
+
+    @Test
+    void conflictsCarryAssetKindAndPriorities(@TempDir Path dir) throws IOException {
+        RustPackMerger merger = merger();
+        Path low = zip(dir.resolve("low.zip"), Map.of(
+                "assets/minecraft/textures/block/stone.png", "low"));
+        Path high = zip(dir.resolve("high.zip"), Map.of(
+                "assets/minecraft/textures/block/stone.png", "high"));
+        List<ZipSource> sources = List.of(
+                new ZipSource("low", true, low, "", 0, List.of()),
+                new ZipSource("high", true, high, "", 10, List.of()));
+
+        MergeResult result = merger.merge(sources, 46, "test pack", dir.resolve("merged.zip"));
+
+        assertEquals(1, result.conflicts().size());
+        MergeResult.Conflict conflict = result.conflicts().get(0);
+        assertEquals("assets/minecraft/textures/block/stone.png", conflict.path());
+        assertEquals("texture", conflict.kind());
+        assertEquals("high", conflict.severity());
+        assertEquals("replace", conflict.mode());
+        assertEquals(10, conflict.winnerPriority());
+        assertEquals(List.of(0), conflict.loserPriorities());
+        assertEquals(40, conflict.winnerSha1().length());
+        assertEquals(1, conflict.loserSha1s().size());
+        assertFalse(conflict.samePriority());
+        assertEquals(1, result.conflictSummary().high());
     }
 
     @Test

@@ -1,6 +1,7 @@
 package moe.nekomc.resourcepack.merge;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.IOException;
@@ -11,7 +12,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import moe.nekomc.resourcepack.core.ZipSource;
 
@@ -132,16 +135,22 @@ public final class RustPackMerger implements Merger {
         if (json.has("conflicts")) {
             for (var element : json.getAsJsonArray("conflicts")) {
                 JsonObject conflict = element.getAsJsonObject();
-                List<String> losers = new ArrayList<>();
-                if (conflict.has("losers")) {
-                    for (var loser : conflict.getAsJsonArray("losers")) {
-                        losers.add(loser.getAsString());
-                    }
-                }
                 conflicts.add(new MergeResult.Conflict(
-                        conflict.get("path").getAsString(), conflict.get("winner").getAsString(), losers));
+                        text(conflict, "path", ""),
+                        text(conflict, "winner", ""),
+                        strings(conflict, "losers"),
+                        text(conflict, "kind", "other"),
+                        text(conflict, "severity", "low"),
+                        text(conflict, "mode", "replace"),
+                        integer(conflict, "winnerPriority", 0),
+                        integers(conflict, "loserPriorities"),
+                        text(conflict, "winnerSha1", ""),
+                        strings(conflict, "loserSha1s"),
+                        bool(conflict, "samePriority", false),
+                        strings(conflict, "fields")));
             }
         }
+        MergeResult.ConflictSummary conflictSummary = conflictSummary(json, conflicts);
         List<String> warnings = new ArrayList<>();
         if (json.has("warnings")) {
             for (var element : json.getAsJsonArray("warnings")) {
@@ -155,13 +164,119 @@ public final class RustPackMerger implements Merger {
                 json.get("bytes").getAsLong(),
                 json.get("entries").getAsInt(),
                 json.has("deduped") ? json.get("deduped").getAsInt() : 0,
-                json.has("format") ? json.get("format").getAsInt() : 0,
-                json.has("format_min") ? json.get("format_min").getAsInt() : 0,
-                json.has("format_max") ? json.get("format_max").getAsInt() : 0,
+                integer(json, "format", 0),
+                integer(json, "format_min", 0),
+                integer(json, "format_max", 0),
                 layers,
                 conflicts,
+                conflictSummary,
                 warnings,
                 millis);
+    }
+
+    private static MergeResult.ConflictSummary conflictSummary(
+            JsonObject json, List<MergeResult.Conflict> conflicts) {
+        if (json.has("conflictSummary") && json.get("conflictSummary").isJsonObject()) {
+            JsonObject summary = json.getAsJsonObject("conflictSummary");
+            Map<String, Integer> byKind = new LinkedHashMap<>();
+            if (summary.has("byKind") && summary.get("byKind").isJsonObject()) {
+                for (var entry : summary.getAsJsonObject("byKind").entrySet()) {
+                    if (entry.getValue().isJsonPrimitive()) {
+                        byKind.put(entry.getKey(), entry.getValue().getAsInt());
+                    }
+                }
+            }
+            return new MergeResult.ConflictSummary(
+                    integer(summary, "total", conflicts.size()),
+                    integer(summary, "high", 0),
+                    integer(summary, "medium", 0),
+                    integer(summary, "low", 0),
+                    byKind,
+                    bool(summary, "truncated", false));
+        }
+        Map<String, Integer> byKind = new LinkedHashMap<>();
+        int high = 0;
+        int medium = 0;
+        int low = 0;
+        for (MergeResult.Conflict conflict : conflicts) {
+            switch (conflict.severity()) {
+                case "high" -> high++;
+                case "medium" -> medium++;
+                default -> low++;
+            }
+            byKind.merge(conflict.kind(), 1, Integer::sum);
+        }
+        return new MergeResult.ConflictSummary(conflicts.size(), high, medium, low, byKind, false);
+    }
+
+    private static String text(JsonObject object, String key, String fallback) {
+        if (object == null || !object.has(key) || !object.get(key).isJsonPrimitive()) {
+            return fallback;
+        }
+        try {
+            return object.get(key).getAsString();
+        } catch (RuntimeException error) {
+            return fallback;
+        }
+    }
+
+    private static int integer(JsonObject object, String key, int fallback) {
+        if (object == null || !object.has(key)) {
+            return fallback;
+        }
+        return integer(object.get(key), fallback);
+    }
+
+    private static int integer(JsonElement element, int fallback) {
+        if (element == null || !element.isJsonPrimitive()) {
+            return fallback;
+        }
+        try {
+            return element.getAsInt();
+        } catch (RuntimeException error) {
+            return fallback;
+        }
+    }
+
+    private static boolean bool(JsonObject object, String key, boolean fallback) {
+        if (object == null || !object.has(key) || !object.get(key).isJsonPrimitive()) {
+            return fallback;
+        }
+        try {
+            return object.get(key).getAsBoolean();
+        } catch (RuntimeException error) {
+            return fallback;
+        }
+    }
+
+    private static List<String> strings(JsonObject object, String key) {
+        List<String> values = new ArrayList<>();
+        if (object == null || !object.has(key) || !object.get(key).isJsonArray()) {
+            return values;
+        }
+        for (var element : object.getAsJsonArray(key)) {
+            if (element.isJsonPrimitive()) {
+                values.add(element.getAsString());
+            }
+        }
+        return values;
+    }
+
+    private static List<Integer> integers(JsonObject object, String key) {
+        List<Integer> values = new ArrayList<>();
+        if (object == null || !object.has(key) || !object.get(key).isJsonArray()) {
+            return values;
+        }
+        for (var element : object.getAsJsonArray(key)) {
+            if (element.isJsonPrimitive()) {
+                try {
+                    values.add(element.getAsInt());
+                } catch (RuntimeException ignored) {
+                    // 报告字段损坏时跳过该元素，不影响整次合并结果解析。
+                }
+            }
+        }
+        return values;
     }
 
     private static String readLimited(Reader reader) throws IOException {
