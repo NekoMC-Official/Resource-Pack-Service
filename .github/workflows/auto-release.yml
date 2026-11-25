@@ -21,6 +21,7 @@ permissions:
   contents: write
   pages: write
   id-token: write
+  actions: write
 
 concurrency:
   group: auto-release
@@ -191,11 +192,47 @@ jobs:
             fi
           } > build/release-notes.md
 
+      - name: Reset Pages artifacts
+        if: steps.plan.outputs.should_release == 'true' && steps.plan.outputs.packs_changed == 'true' && steps.bundle.outputs.has_packs == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "github-pages") | .id' |
+          while read -r id; do
+            [ -n "$id" ] || continue
+            gh api -X DELETE "repos/$REPO/actions/artifacts/$id"
+          done
+
       - name: Upload Pages artifact
         if: steps.plan.outputs.should_release == 'true' && steps.plan.outputs.packs_changed == 'true' && steps.bundle.outputs.has_packs == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: build/pages
+
+      - name: Wait for Pages artifact
+        if: steps.plan.outputs.should_release == 'true' && steps.plan.outputs.packs_changed == 'true' && steps.bundle.outputs.has_packs == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            count=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "github-pages")] | length')
+            if [ "$count" -eq 1 ]; then
+              echo "Pages artifact ready"
+              exit 0
+            fi
+            echo "waiting for Pages artifact ($count found)"
+            sleep 2
+          done
+          echo "Pages artifact not available" >&2
+          exit 1
 
       - name: Deploy Pages
         id: deploy
