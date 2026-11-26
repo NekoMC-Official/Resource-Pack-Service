@@ -68,7 +68,7 @@ public final class BundledRust {
             logger.info("已解出内置合并器：" + target + "（" + payload.length + " 字节）");
             return target;
         } catch (IOException error) {
-            logger.warning("解出内置合并器失败，本次只用 Java 合并：" + error.getMessage());
+            logger.warning("解出内置合并器失败，合成将不可用（仓库没有 Java 合并实现）：" + error.getMessage());
             return null;
         }
     }

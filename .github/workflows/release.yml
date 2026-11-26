@@ -40,8 +40,9 @@ jobs:
           BIN="$PWD/rust/rps-pack/target/release/rps-pack"
           if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
           RPS_PACK_BIN="$BIN" ./gradlew build --no-daemon -Pversion="$VERSION"
-          PAPER_JAR="$(ls paper/build/libs/resource-pack-service-*.jar | head -n1)"
-          FABRIC_JAR="$(ls fabric/build/libs/resource-pack-service-fabric-*.jar | head -n1)"
+          python3 -c "import glob,sys,zipfile; jars=[j for j in glob.glob('paper/build/libs/resource-pack-service-*.jar')+glob.glob('fabric/build/libs/resource-pack-service-fabric-*.jar') if not j.endswith('-plain.jar')]; sys.exit('没有匹配到任何待发布 jar') if not jars else None; bad=[j for j in jars if not [n for n in zipfile.ZipFile(j).namelist() if n.startswith('rps-pack/bin/rps-pack')]]; print('缺少内置合并器:', bad) if bad else print('内置合并器已随包:', len(jars), '个 jar'); sys.exit(1 if bad else 0)"
+          PAPER_JAR="$(ls paper/build/libs/resource-pack-service-*.jar | grep -v -- '-plain.jar' | head -n1)"
+          FABRIC_JAR="$(ls fabric/build/libs/resource-pack-service-fabric-*.jar | grep -v -- '-plain.jar' | head -n1)"
           cp "$PAPER_JAR" "resource-pack-service-${VERSION}-${{ matrix.platform }}.jar"
           cp "$FABRIC_JAR" "resource-pack-service-fabric-${VERSION}-${{ matrix.platform }}.jar"
       - uses: actions/upload-artifact@v7

@@ -93,7 +93,7 @@ val cargoBuild by tasks.registering(Exec::class) {
     onlyIf { cargoExe != null && rustDir.file("Cargo.toml").asFile.isFile }
 }
 
-val stageRustBinary by tasks.registering(Copy::class) {
+val stageRustBinary by tasks.registering(Sync::class) {
     group = "rust"
     description = "把合并器复制到 build/dist/bin"
     dependsOn(cargoBuild)
@@ -109,16 +109,23 @@ val writePlatformMarker by tasks.registering {
     description = "写 dist/marker/platform.txt，标记构建平台"
     dependsOn(stageRustBinary)
     val markerDir = layout.buildDirectory.dir("dist/marker")
+    // 平台名参与判定，否则改架构后任务仍是 UP-TO-DATE
+    inputs.property("rustPlatformName", rustPlatformName)
+    // staging 的产物也要参与判定：Sync 清空 dist/bin 后旧标记必须失效
+    inputs.dir(layout.buildDirectory.dir("dist/bin"))
     outputs.dir(markerDir)
     doLast {
         val binDir = layout.buildDirectory.dir("dist/bin").get().asFile
+        val dir = markerDir.get().asFile
+        val marker = File(dir, "platform.txt")
         val staged = binDir.listFiles()?.any { it.name.startsWith("rps-pack") } == true
         if (!staged) {
+            // 没打进二进制就别留下上一个平台的标记
+            marker.delete()
             return@doLast
         }
-        val dir = markerDir.get().asFile
         dir.mkdirs()
-        File(dir, "platform.txt").writeText(rustPlatformName)
+        marker.writeText(rustPlatformName)
     }
 }
 

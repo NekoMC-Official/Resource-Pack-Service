@@ -26,7 +26,8 @@ public final class CompatibilityCheck {
     public static void verify(Logger logger) {
         if (!responseHookAvailable()) {
             logger.warning("[资源包] 当前 Minecraft 版本没有 ServerCommonPacketListenerImpl#handleResourcePackResponse，"
-                + "资源包回执将无法被跟踪（推送仍会发出，但状态不会更新）");
+                + "资源包回执无法跟踪。mixin 配置为 required=true，正常情况服务端会直接启动失败；"
+                + "若服务端仍然启动，说明注入被跳过，请检查 mod 冲突与 mixin 日志。");
         }
     }
 }

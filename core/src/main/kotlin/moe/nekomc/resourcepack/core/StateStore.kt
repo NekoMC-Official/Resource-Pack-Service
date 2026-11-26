@@ -2,8 +2,10 @@ package moe.nekomc.resourcepack.core
 
 import java.io.IOException
 import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 
 /**
  * 合成包世代与上次构建信息（state.json）。
@@ -72,14 +74,22 @@ class StateStore(private val file: Path) {
             val text = "{\"generation\":" + generationValue +
                 ",\"sha1\":\"" + sha1Value + "\"" +
                 ",\"builtAt\":\"" + builtAtValue + "\"}" + "\n"
-            Files.writeString(file, text, StandardCharsets.UTF_8)
+            // 先写临时文件再换名：进程中途退出也不会留下半截 JSON。
+            val temp = file.resolveSibling(file.fileName.toString() + ".tmp")
+            Files.writeString(temp, text, StandardCharsets.UTF_8)
+            try {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (unsupported: AtomicMoveNotSupportedException) {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING)
+            }
         } catch (exception: IOException) {
             // 状态文件写不了只影响世代号连续性，不影响本次下发
         }
     }
 
     private fun match(text: String, key: String): String? {
-        val pattern = Regex("\"" + key + "\"\\s*:\\s*\"?([^\",}\\s]*)\"?")
+        // 值里可能有空格（builtAt 的日期时间），不能用空白做分隔。
+        val pattern = Regex("\"" + key + "\"\\s*:\\s*\"?([^\",}]*)")
         return pattern.find(text)?.groupValues?.get(1)
     }
 }

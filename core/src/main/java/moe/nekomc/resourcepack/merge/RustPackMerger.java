@@ -64,31 +64,53 @@ public final class RustPackMerger implements Merger {
             process.destroyForcibly();
             throw new MergeUnavailableException("写入 rps-pack 请求失败：" + error.getMessage(), error);
         }
-        String stdout;
-        try (Reader reader = new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)) {
-            stdout = readLimited(reader);
-        } catch (IOException error) {
-            process.destroyForcibly();
-            throw new MergeUnavailableException("读取 rps-pack 输出失败：" + error.getMessage(), error);
-        }
+        // stdout 必须一边写一边读：遇到卡住的进程时也要能走到 waitFor 的超时分支。
+        StringBuilder stdoutBuffer = new StringBuilder();
+        Thread pump = new Thread(() -> {
+            try (Reader reader = new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)) {
+                String text = readLimited(reader);
+                synchronized (stdoutBuffer) {
+                    stdoutBuffer.append(text);
+                }
+            } catch (IOException ignored) {
+                // 进程被强杀时读线程随之结束，退出码/超时由主线程报告。
+            }
+        }, "rps-pack-stdout");
+        pump.setDaemon(true);
+        pump.start();
         int exit;
         try {
-            if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+            boolean finished;
+            try {
+                finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                process.destroyForcibly();
+                throw new MergeUnavailableException("等待 rps-pack 时被中断", error);
+            }
+            if (!finished) {
                 process.destroyForcibly();
                 throw new MergeUnavailableException("rps-pack 超过 " + timeoutMs + "ms 未完成");
             }
             exit = process.exitValue();
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-            process.destroyForcibly();
-            throw new MergeUnavailableException("等待 rps-pack 时被中断", error);
+            try {
+                pump.join(2000L);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+            String stdout;
+            synchronized (stdoutBuffer) {
+                stdout = stdoutBuffer.toString();
+            }
+            String stderr = stderrTail(errFile, stdout);
+            if (exit != 0) {
+                throw new MergeUnavailableException("rps-pack 退出码 " + exit + "：" + stderr);
+            }
+            return result(stdout, started, output);
         } finally {
+            // 超时/中断/退出码失败都不该在 output 目录里留下 .stderr 垃圾
             deleteQuietly(errFile);
         }
-        if (exit != 0) {
-            throw new MergeUnavailableException("rps-pack 退出码 " + exit + "：" + stderrTail(errFile, stdout));
-        }
-        return result(stdout, started, output);
     }
 
     private JsonObject request(List<ZipSource> sources, int formatOverride, String description) {
@@ -102,6 +124,7 @@ public final class RustPackMerger implements Merger {
             JsonObject item = new JsonObject();
             item.addProperty("id", source.id());
             item.addProperty("path", source.path().toAbsolutePath().toString());
+            item.addProperty("enabled", source.enabled());
             item.addProperty("priority", source.priority());
             array.add(item);
         }

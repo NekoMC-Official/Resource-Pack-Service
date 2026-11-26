@@ -18,7 +18,7 @@ class RpsConfigAnnounceRequiredTest {
         if (announceRequired != null) {
             config.set("provider.announce-required", announceRequired);
         }
-        return RpsConfig.load(new BukkitConfigSource(config), Paths.get("."));
+        return RpsConfig.load(new BukkitConfigSource(config), Paths.get("."), null);
     }
 
     @Test

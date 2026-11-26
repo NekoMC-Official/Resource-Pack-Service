@@ -40,6 +40,7 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
     private final ConcurrentHashMap<UUID, String> pushedSha1 = new ConcurrentHashMap<>();
     private volatile String lastUrl = "";
     private volatile String lastSha1 = "";
+    private volatile boolean closed;
 
     public FabricPackDelivery(
         FabricPlatform platform,
@@ -152,7 +153,7 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
 
     @Override
     public int push(UUID playerId, boolean force) {
-        if (playerId == null) {
+        if (playerId == null || closed) {
             return 0;
         }
         ServerPlayer player = platform.player(playerId);
@@ -211,6 +212,9 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
 
     /** 玩家进服：按 join-delay 排一次推送。 */
     public void onJoin(ServerPlayer player) {
+        if (closed) {
+            return;
+        }
         UUID id = player.getUUID();
         long delay = Math.max(1L, joinDelayTicks) * 50L;
         platform.scheduler().runAsyncTimer(delay, 0L, () -> push(id, false));
@@ -232,11 +236,20 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
         String sha1 = pushedSha1.getOrDefault(id, lastSha1);
         PackStatus mapped = switch (action) {
             case SUCCESSFULLY_LOADED -> PackStatus.LOADED;
-            case DECLINED, DISCARDED -> PackStatus.DECLINED;
+            case DECLINED -> PackStatus.DECLINED;
+            case DISCARDED -> null;
             case FAILED_DOWNLOAD, FAILED_RELOAD -> PackStatus.FAILED;
             case INVALID_URL -> PackStatus.INVALID_URL;
             case ACCEPTED, DOWNLOADED -> PackStatus.PENDING;
         };
+        if (closed) {
+            return;
+        }
+        if (mapped == null) {
+            // DISCARDED 是客户端丢弃旧包（换包/退出）的通知，Paper 侧同样不记录、不断开。
+            platform.logger().fine(LOG_PREFIX + "玩家 " + name + " 丢弃了资源包通知");
+            return;
+        }
         // 26.3 的同一次加载会从 Netty 与主线程各投递一次同样回执，重复状态只记第一次，
         // 免得重复打日志、重复触发断开排程。
         if (statuses.status(id) == mapped && java.util.Objects.equals(statuses.hash(id), sha1)) {
@@ -252,7 +265,7 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
                     platform.logger().fine(LOG_PREFIX + "玩家 " + name + " 已加载资源包");
                 }
             }
-            case DECLINED, DISCARDED -> {
+            case DECLINED -> {
                 if (required) {
                     platform.logger().warning(LOG_PREFIX + "玩家 " + name + " 拒绝了必装资源包，已排程断开");
                     platform.runOnServerLater(() -> {
@@ -282,6 +295,7 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
 
     @Override
     public void close() {
+        closed = true;
         PackHttpServer current = server;
         if (current != null) {
             current.close();

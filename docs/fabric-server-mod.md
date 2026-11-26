@@ -262,22 +262,22 @@ P0–P3 已落地并在真机跑通，P5（发行/CI）与 P6（对外文档）�
 
 其它固定项：loom `1.19.4`、MC `26.3`、loader `0.20.1`、fabric-api `0.167.0+26.3`、toolchain 26 / `release 25`、Rust 二进制由 `:fabric:stageRustBinary` 打进 `rps-pack/bin/rps-pack-windows-x86_64.exe`。
 
-### 12.2 实际文件清单（`fabric/src/main/`，13 个源文件 + 2 个资源）
+### 12.2 实际文件清单（`fabric/src/main/`，12 个源文件 + 2 个资源）
 
 | 文件 | 行数 | 职责 |
 | --- | --- | --- |
-| `fabric/RpsFabricMod.java` | 57 | `DedicatedServerModInitializer`：启动自检、命令注册、生命周期与加入/退出事件接线 |
-| `fabric/FabricPlatform.java` | 555 | `PackHost + CommandHost` 实现：配置装配、HTTP 出口、watcher、社区包、reload 顺序、`runOnServer` |
-| `fabric/FabricPackDelivery.java` | 293 | 发包、回执状态映射、去重、必装踢人、状态提示 |
-| `fabric/FabricConfigSource.java` | 117 | SnakeYAML `Map` 上的 `ConfigSource`，点号取值、类型回退 |
-| `fabric/TickScheduler.java` | 138 | 自建 `Scheduler`：主线程 tick 扫到期任务，任务跑守护线程池 |
-| `fabric/MiniMessages.java` | 103 | MiniMessage 极小子集 → 原版 `Component`（无 Adventure） |
+| `fabric/RpsFabricMod.java` | 73 | `DedicatedServerModInitializer`：启动自检、命令注册、生命周期与加入/退出事件接线 |
+| `fabric/FabricPlatform.java` | 611 | `PackHost + CommandHost` 实现：配置装配、HTTP 出口、watcher、社区包、reload 顺序、`runOnServer` |
+| `fabric/FabricPackDelivery.java` | 307 | 发包、回执状态映射、去重、必装踢人、状态提示 |
+| `fabric/FabricConfigSource.java` | 118 | SnakeYAML `Map` 上的 `ConfigSource`，点号取值、类型回退 |
+| `fabric/TickScheduler.java` | 145 | 自建 `Scheduler`：主线程 tick 扫到期任务，任务跑守护线程池 |
+| `fabric/MiniMessages.java` | 164 | MiniMessage 极小子集 → 原版 `Component`（无 Adventure） |
 | `fabric/FabricCommands.java` | 63 | Brigadier `/rps`（greedy 参数）+ 内核补全 |
-| `fabric/FabricCommandSender.java` | 50 | `CommandSourceStack` → `CommandSenderRef`，权限用 op 表折算 |
+| `fabric/FabricCommandSender.java` | 53 | `CommandSourceStack` → `CommandSenderRef`，权限用 op 表折算 |
 | `fabric/FabricPlayerRef.java` | 24 | `ServerPlayer` → `PlayerRef` |
 | `fabric/FabricLog.java` | 54 | JUL → slf4j 桥（内核用 JUL，不桥接就只进 stdout、不进 `logs/latest.log`） |
-| `fabric/CompatibilityCheck.java` | 40 | 启动时反射确认 `handleResourcePackResponse` 仍在，防 mixin 静默失效 |
-| `fabric/mixin/ServerCommonPacketListenerMixin.java` | 32 | `@Inject(at = HEAD)`，只观测不取消 |
+| `fabric/CompatibilityCheck.java` | 33 | 启动时反射确认 `handleResourcePackResponse` 仍在，防 mixin 静默失效 |
+| `fabric/mixin/ServerCommonPacketListenerMixin.java` | 36 | `@Inject(at = TAIL)`，只观测不取消（TAIL 才会跑在主线程） |
 | `resources/fabric.mod.json` | 22 | id/entrypoint/mixins/depends |
 | `resources/resource-pack-service.mixins.json` | 12 | `server: [ServerCommonPacketListenerMixin]` |
 
@@ -322,3 +322,12 @@ P0–P3 已落地并在真机跑通，P5（发行/CI）与 P6（对外文档）�
 - **第三方资源包扫描补上 Fabric**：`CommandHost.conflictScanRoot()` 换成 `conflictScanRoots(): List<Path>`（Paper 返回 `plugins/`，Fabric 返回 `config/`）；`PackConflictScanner` 新增 `scanRoots`，除原有 `config.yml` 布局外还认 `*.toml` / `*.properties` / 扫描根下散放的 `*.yml`（键允许 `server-resource-pack` 这类前缀），`/rps check` 两端行为一致；单测从 6 个扩到 10 个。
 - **Deploy 目录拆分**：新增 `DEPLOY_MODS_DIR` secret，Fabric 变体投 `mods/`，未配置时回落 `DEPLOY_PLUGINS_DIR`；同时修正 `deploy.yml` 里 `variant` 输入误缩进到 `platform` 下面的问题（此前 `inputs.variant` 实际不存在）。
 - **平台标记**：`paper` / `fabric` 两个构建脚本新增 `writePlatformMarker`，把 `rps-pack/bin/platform.txt` 打进 jar；`BundledRust.ensure` 在解不出当前平台二进制时读它并警告具体是哪个平台的产物。
+
+### 12.7 审计修复轮（2026-11-27）
+
+二次审计（功能对等 / 内核并发 / Fabric 运行时 / 构建发行）共 15 条 P1，全部处理完，其中改动落在：
+
+- **内核**：`PackPublisher` 引入构建轮次号，`rebuildAsync` 只完成"本次及更早轮次"的 waiter（此前并发时 future 会拿到上一轮结果）；`enabled: false` 的来源不再进合成；`EntryManifest` 与公告各自 try/catch（包已落盘却判失败会回滚 current 并僵死 ETag）；`RustPackMerger` 改守护线程泵 stdout + 主线程 `waitFor(timeout)`（此前超时永不生效），request 带上 `enabled`；`PackHttpServer` 用同一 `FileChannel` 取大小并流式写出（此前先 `Files.size` 再 copy，换包瞬间会写超/截断），`start()` 同步、端口越界抛 `IOException`；`RpsConfig` 端口 `coerceIn(0, 65535)`、`community.dir` 支持平台默认值；`StateStore` 临时文件 + ATOMIC_MOVE；`SourceWatcher` 全同步 + `interval <= 0` 明确告警；`/rps conflicts` 需要 `rps.conflicts` 或 `rps.admin`。
+- **Fabric**：`DISCARDED` 不再映射成 DECLINED（Paper 也不记录不踢）；`closed` 后不再发包；`FabricConfigSource.getString` 与非字符串取值对齐 Bukkit（`pack-format: 97` 不再退回 auto）；`readConfig` 解析失败直接抛错而不静默回默认；`reload` 先把配置与来源全部解析完再换字段，换字段之后的通道启停逐项降级（单个通道起不来只告警、不回滚），首次装配失败则明确报「服务未启用」；`TickScheduler` 改固定线程池 + `nanoTime` + 异常记日志；`MiniMessages` 支持 `<click:run_command>/<click:suggest_command>` 与 `<u>`、`\<` 转义；命令源权限按原版权限位折算（控制台不再无条件全权）；mixin 注入点从 HEAD 改 TAIL（HEAD 会跑在 Netty 线程）；生命周期回调统一包 `safe(...)`，单个配置错误不再带崩服务端。
+- **构建 / 发行**：Auto Release 发布前把产物 `cp` 成 `resource-pack-service-<ver>-linux-x86_64.jar` / `...-fabric-<ver>-linux-x86_64.jar`（与 `deploy.yml` 的 `*-<platform>.jar` 对齐）；CI / Release / Auto Release 都断言 jar 内含 `rps-pack/bin/rps-pack*`；`--code-paths` 与 auto-release paths 补 `gradle/**`、`gradle.properties`；`stageRustBinary` 改 `Sync`（跨平台重复构建不再留同名双条目）；platform marker 任务加 inputs 并在没有二进制时删旧标记；`fabric.mod.json` 的 fabric-api 依赖收紧到 `>=0.167.0`。
+- **已评估不改**：kotlin-stdlib 不做 relocate —— Bukkit 每个插件独立类加载器，jar 内的 `kotlin/` 不会与别的插件互相顶替；代价只是包体大一点。

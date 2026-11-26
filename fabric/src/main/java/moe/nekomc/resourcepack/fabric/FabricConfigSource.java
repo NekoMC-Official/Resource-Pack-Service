@@ -43,7 +43,8 @@ public final class FabricConfigSource implements ConfigSource {
     @Override
     public String getString(String path, String fallback) {
         Object value = raw(path);
-        return value instanceof String text ? text : fallback;
+        // 与 Bukkit 的 getString 对齐：数字/布尔也按文本读，免得 YAML 里 pack-format: 97 被当成缺省。
+        return value == null ? fallback : String.valueOf(value);
     }
 
     @Override

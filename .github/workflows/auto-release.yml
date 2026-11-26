@@ -255,8 +255,14 @@ jobs:
           TARGET: ${{ github.sha }}
         run: |
           set -euo pipefail
-          PAPER_JAR="$(ls paper/build/libs/resource-pack-service-*.jar | head -n1)"
-          FABRIC_JAR="$(ls fabric/build/libs/resource-pack-service-fabric-*.jar | head -n1)"
+          PAPER_JAR="$(ls paper/build/libs/resource-pack-service-*.jar | grep -v -- '-plain.jar' | head -n1)"
+          FABRIC_JAR="$(ls fabric/build/libs/resource-pack-service-fabric-*.jar | grep -v -- '-plain.jar' | head -n1)"
+          # 资产名带平台标记：deploy.yml 按 *-<platform>.jar 下载，orig 名对不上
+          cp "$PAPER_JAR" "resource-pack-service-${VERSION}-linux-x86_64.jar"
+          cp "$FABRIC_JAR" "resource-pack-service-fabric-${VERSION}-linux-x86_64.jar"
+          PAPER_JAR="resource-pack-service-${VERSION}-linux-x86_64.jar"
+          FABRIC_JAR="resource-pack-service-fabric-${VERSION}-linux-x86_64.jar"
+          python3 -c "import glob,sys,zipfile; jars=[j for j in glob.glob('paper/build/libs/resource-pack-service-*.jar')+glob.glob('fabric/build/libs/resource-pack-service-fabric-*.jar') if not j.endswith('-plain.jar')]; sys.exit('没有匹配到任何待发布 jar') if not jars else None; bad=[j for j in jars if not [n for n in zipfile.ZipFile(j).namelist() if n.startswith('rps-pack/bin/rps-pack')]]; print('缺少内置合并器:', bad) if bad else print('内置合并器已随包:', len(jars), '个 jar'); sys.exit(1 if bad else 0)"
           ASSETS=("$PAPER_JAR" "$FABRIC_JAR")
           if [ -f build/community-packs.zip ]; then
             ASSETS+=("build/community-packs.zip")

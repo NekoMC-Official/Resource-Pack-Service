@@ -11,6 +11,7 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import moe.nekomc.resourcepack.api.BuildResult
@@ -29,17 +30,24 @@ import moe.nekomc.resourcepack.merge.Mergers
  */
 class PackPublisher(private val plugin: PackHost) {
 
+    /** 等待者绑定到"第几轮构建"：本轮开始后才注册的等待者由下一轮完成，不会被旧结果提前唤醒。 */
+    private data class Waiter(val round: Int, val future: CompletableFuture<BuildResult>)
+
     private val current = AtomicReference(PackSnapshot.empty())
     private val running = AtomicBoolean(false)
     private val pending = AtomicBoolean(false)
     private val pendingAnnounce = AtomicBoolean(false)
-    private val waiters = ConcurrentLinkedQueue<CompletableFuture<BuildResult>>()
-    private val community = java.util.concurrent.atomic.AtomicReference<List<ZipSource>>(emptyList())
+    private val roundSeq = AtomicInteger(0)
+    private val waiters = ConcurrentLinkedQueue<Waiter>()
+    private val community = AtomicReference<List<ZipSource>>(emptyList())
 
     /** 本实例是否仍然有效；reload / onDisable 会把旧实例作废，在途构建据此放弃结果。 */
     private val active = AtomicBoolean(true)
 
     fun snapshot(): PackSnapshot = current.get()
+
+    /** 只读探针：reload 之后旧实例会变成 false，测试与诊断用。 */
+    fun isActive(): Boolean = active.get()
 
     /** 当前构建结果；失败时保留上一版字段并带 error。 */
     fun buildResult(): BuildResult {
@@ -58,7 +66,7 @@ class PackPublisher(private val plugin: PackHost) {
         return true
     }
 
-    private fun sameSources(left: List<ZipSource>, right: List<ZipSource>): Boolean {
+    fun sameSources(left: List<ZipSource>, right: List<ZipSource>): Boolean {
         if (left.size != right.size) {
             return false
         }
@@ -80,16 +88,19 @@ class PackPublisher(private val plugin: PackHost) {
         if (!active.get()) {
             return CompletableFuture.completedFuture(BuildResult.unavailable("发布器已被替换"))
         }
-        val waiter = CompletableFuture<BuildResult>()
+        val waiter = Waiter(roundSeq.get() + 1, CompletableFuture())
         waiters.add(waiter)
         rebuild(announce)
-        return waiter
+        if (!active.get()) {
+            completeAllWaiters(BuildResult.unavailable("发布器已被替换"))
+        }
+        return waiter.future
     }
 
     /** 作废本实例：在途构建发现 active 为 false 后不再落盘，也不再覆盖对外快照。 */
     fun supersede() {
         active.set(false)
-        completeWaiters(BuildResult.unavailable("发布器已被替换"))
+        completeAllWaiters(BuildResult.unavailable("发布器已被替换"))
     }
 
     /** 合并实现的名字，用于状态展示。 */
@@ -118,10 +129,11 @@ class PackPublisher(private val plugin: PackHost) {
             return
         }
         val task = Runnable {
+            val round = roundSeq.incrementAndGet()
             try {
-                build(announce)
+                build(announce, round)
             } catch (error: Throwable) {
-                recordFailure(error)
+                recordFailure(error, round)
             } finally {
                 running.set(false)
                 if (pending.compareAndSet(true, false) && active.get()) {
@@ -129,15 +141,24 @@ class PackPublisher(private val plugin: PackHost) {
                 }
             }
         }
-        plugin.scheduler().runAsyncNow(task)
+        try {
+            plugin.scheduler().runAsyncNow(task)
+        } catch (error: Throwable) {
+            // 调度不出去（插件已在关闭中）就不能让 running 卡死，也不能让等待者永远悬挂。
+            running.set(false)
+            val message = "无法排程合成：" + (error.message ?: error.javaClass.simpleName)
+            plugin.logger().warning(message)
+            completeAllWaiters(BuildResult.unavailable(message))
+        }
     }
 
-    private fun build(announce: Boolean) {
+    private fun build(announce: Boolean, round: Int) {
         val config = plugin.config()
-        val sources = plugin.registry().ordered().toMutableList()
+        // enabled: false 的来源保留在配置里用于展示，但不参与合成。
+        val sources = plugin.registry().ordered().filter { it.enabled() }.toMutableList()
         sources.addAll(community.get())
         if (sources.isEmpty()) {
-            recordFailure(IllegalStateException("还没有登记任何来源"))
+            recordFailure(IllegalStateException("还没有可用的来源（检查 sources 是否都是 enabled: false）"), round)
             return
         }
         val outputDir = config.outputDir()
@@ -180,7 +201,12 @@ class PackPublisher(private val plugin: PackHost) {
             Files.move(created, target, StandardCopyOption.REPLACE_EXISTING)
             val changed = plugin.stateStore().commit(sha1, builtAt)
             staging = null
-            EntryManifest.rotateAndWrite(outputDir, target)
+            // 包已经落盘：清单写失败只能告警，不能把这一版判成失败（否则 current 回滚、ETag 僵死）。
+            try {
+                EntryManifest.rotateAndWrite(outputDir, target)
+            } catch (exception: Exception) {
+                plugin.logger().warning("写入条目清单失败：" + (exception.message ?: exception.javaClass.simpleName))
+            }
 
             val version = plugin.stateStore().generation()
             val delivery = plugin.delivery()
@@ -197,7 +223,7 @@ class PackPublisher(private val plugin: PackHost) {
             } catch (exception: Exception) {
                 plugin.logger().warning("写入冲突报告失败：" + (exception.message ?: exception.javaClass.simpleName))
             }
-            completeWaiters(buildResult())
+            completeWaiters(buildResult(), round)
             if (delivery == null) {
                 plugin.logger().warning("下发器还没有就绪，本次合成结果不会自动推送")
             } else {
@@ -211,7 +237,11 @@ class PackPublisher(private val plugin: PackHost) {
                 plugin.logger().info("内容与上一版一致，跳过重推")
                 return
             }
-            announce(result)
+            try {
+                announce(result)
+            } catch (exception: Exception) {
+                plugin.logger().warning("推送通知失败：" + (exception.message ?: exception.javaClass.simpleName))
+            }
         } finally {
             val leftover = staging
             if (leftover != null) {
@@ -246,18 +276,30 @@ class PackPublisher(private val plugin: PackHost) {
         }
     }
 
-    private fun recordFailure(error: Throwable) {
+    private fun recordFailure(error: Throwable, round: Int) {
         val previous = current.get()
         val detail = error.message ?: error.javaClass.simpleName
         plugin.logger().severe("合成失败：" + detail)
         current.set(previous.failed(detail))
-        completeWaiters(buildResult())
+        completeWaiters(buildResult(), round)
     }
 
-    private fun completeWaiters(result: BuildResult) {
+    /** 只完成本轮及更早的等待者；本轮之后登记的留给下一次构建。 */
+    private fun completeWaiters(result: BuildResult, round: Int) {
+        val iterator = waiters.iterator()
+        while (iterator.hasNext()) {
+            val waiter = iterator.next()
+            if (waiter.round <= round) {
+                iterator.remove()
+                waiter.future.complete(result)
+            }
+        }
+    }
+
+    private fun completeAllWaiters(result: BuildResult) {
         while (true) {
             val waiter = waiters.poll() ?: return
-            waiter.complete(result)
+            waiter.future.complete(result)
         }
     }
 

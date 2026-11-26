@@ -223,7 +223,8 @@ class RpsCommand(private val plugin: CommandHost) {
             if (findings.isEmpty()) {
                 sender.sendMessage(PackMessages.ok("没有发现别的插件自己配资源包地址"))
             } else {
-                sender.sendMessage(PackMessages.warn("发现 " + findings.size + " 处疑似冲突配置："))
+                val capped = if (findings.size >= 10) "（只列前 10 条，其余直接看配置文件）" else ""
+                sender.sendMessage(PackMessages.warn("发现 " + findings.size + " 处疑似冲突配置" + capped + "："))
                 for (finding in findings) {
                     sender.sendMessage(
                         PackMessages.field(
@@ -415,7 +416,7 @@ class RpsCommand(private val plugin: CommandHost) {
             return true
         }
         if (sub == "conflicts") {
-            return true
+            return sender.hasPermission("rps.conflicts") || sender.hasPermission("rps.admin")
         }
         if (sub == "rejected") {
             return sender.hasPermission("rps.status") || sender.hasPermission("rps.admin")

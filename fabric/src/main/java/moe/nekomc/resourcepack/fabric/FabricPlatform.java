@@ -51,7 +51,7 @@ public final class FabricPlatform implements PackHost, CommandHost {
     private final Logger logger;
     private final Path dataFolder;
     private final Path serverRoot;
-    private final TickScheduler scheduler = new TickScheduler();
+    private final TickScheduler scheduler;
 
     private volatile MinecraftServer server;
     private volatile RpsConfig config;
@@ -69,6 +69,7 @@ public final class FabricPlatform implements PackHost, CommandHost {
 
     public FabricPlatform(Logger logger, Path dataFolder, Path serverRoot) {
         this.logger = logger;
+        this.scheduler = new TickScheduler(logger);
         this.dataFolder = dataFolder.toAbsolutePath().normalize();
         this.serverRoot = serverRoot.toAbsolutePath().normalize();
         this.stateStore = new StateStore(this.dataFolder.resolve("state.json"));
@@ -165,17 +166,42 @@ public final class FabricPlatform implements PackHost, CommandHost {
 
     @Override
     public void reload() {
+        try {
+            reloadStaged();
+        } catch (RuntimeException error) {
+            if (this.config == null) {
+                // 首次装配就失败：没有"上一份"可用配置，服务保持未启用，别让 /rps 半死不活。
+                logger.severe("[ResourcePackService] 首次装配失败，服务未启用；修正 config.yml 后执行 /rps reload：" + error);
+                return;
+            }
+            // 能走到这里说明失败发生在切换到新配置之前，旧配置与旧下发仍然生效。
+            logger.severe("[ResourcePackService] 重载失败，继续使用上一份可用配置：" + error);
+            if (this.publisher == null) {
+                this.publisher = new PackPublisher(this);
+            }
+            try {
+                startWatcher();
+            } catch (RuntimeException watcherError) {
+                logger.warning("[ResourcePackService] 重载失败后恢复来源侦测也失败：" + watcherError);
+            }
+        }
+    }
+
+    private void reloadStaged() {
         stopWatcher();
         ensureConfigFile();
         ConfigSourceHolder holder = readConfig();
-        RpsConfig nextConfig = RpsConfig.load(holder.source(), serverRoot);
-        this.config = nextConfig;
-        this.engineConfig = EngineConfig.load(holder.source(), dataFolder);
-        this.stateStore = new StateStore(dataFolder.resolve("state.json"));
+        // 先把新配置全部读完再落字段：任何一步抛错都不会污染正在生效的旧配置。
+        RpsConfig nextConfig = RpsConfig.load(holder.source(), serverRoot, dataFolder.resolve("community"));
+        EngineConfig nextEngine = EngineConfig.load(holder.source(), dataFolder);
+        StateStore nextState = new StateStore(dataFolder.resolve("state.json"));
         SourceRegistry nextRegistry = new SourceRegistry();
         for (ZipSource source : nextConfig.sources()) {
             nextRegistry.put(source);
         }
+        this.config = nextConfig;
+        this.engineConfig = nextEngine;
+        this.stateStore = nextState;
         this.registry = nextRegistry;
 
         PackPublisher previous = this.publisher;
@@ -188,11 +214,33 @@ public final class FabricPlatform implements PackHost, CommandHost {
 
         PackPublisher fresh = new PackPublisher(this);
         this.publisher = fresh;
-        startDelivery();
-        refreshCommunity(false);
-        fresh.rebuild(true);
-        startRemote();
-        startWatcher();
+        // 配置已生效，后面的每一步都不该把整次 reload 判成失败：单个通道起不来只降级，
+        // 否则外层 catch 会打出"仍用旧配置"这种与事实相反的日志。
+        try {
+            startDelivery();
+        } catch (RuntimeException error) {
+            logger.warning("[ResourcePackService] 下发通道启动失败，资源包暂时无法推送：" + error);
+        }
+        try {
+            refreshCommunity(false);
+        } catch (RuntimeException error) {
+            logger.warning("[ResourcePackService] 社区包刷新失败：" + error.getMessage());
+        }
+        try {
+            fresh.rebuild(true);
+        } catch (RuntimeException error) {
+            logger.warning("[ResourcePackService] 首次合成排程失败：" + error);
+        }
+        try {
+            startRemote();
+        } catch (RuntimeException error) {
+            logger.warning("[ResourcePackService] 社区远端更新启动失败：" + error);
+        }
+        try {
+            startWatcher();
+        } catch (RuntimeException error) {
+            logger.warning("[ResourcePackService] 来源侦测启动失败：" + error);
+        }
     }
 
     private record ConfigSourceHolder(FabricConfigSource source) {
@@ -230,8 +278,8 @@ public final class FabricPlatform implements PackHost, CommandHost {
             }
             return new ConfigSourceHolder(new FabricConfigSource(java.util.Map.of()));
         } catch (Exception error) {
-            logger.severe("[ResourcePackService] config.yml 解析失败，按默认值运行：" + error.getMessage());
-            return new ConfigSourceHolder(new FabricConfigSource(java.util.Map.of()));
+            // 解析失败不能静默回默认值：一次缩进错误就会把整份服务器配置悄悄清空。
+            throw new IllegalStateException("config.yml 解析失败：" + error.getMessage(), error);
         }
     }
 
@@ -246,8 +294,12 @@ public final class FabricPlatform implements PackHost, CommandHost {
                     snapshot.deliveryHttpPort(),
                     snapshot.deliveryHttpPath());
                 next.start();
-            } catch (IOException error) {
+            } catch (Exception error) {
+                // 端口越界抛的是 IllegalArgumentException，不只 IOException。
                 logger.warning("[ResourcePackService] HTTP 出口启动失败：" + error.getMessage());
+                if (next != null) {
+                    next.close();
+                }
                 next = null;
             }
         }
@@ -281,6 +333,10 @@ public final class FabricPlatform implements PackHost, CommandHost {
 
     private void startWatcher() {
         RpsConfig snapshot = config;
+        if (snapshot == null) {
+            // 装配失败时没有配置可读，别在这里补一个 NPE 让调用方再吞一次。
+            return;
+        }
         if (!snapshot.watchEnabled()) {
             return;
         }
@@ -543,13 +599,13 @@ public final class FabricPlatform implements PackHost, CommandHost {
     /** 关服：停调度器、停 HTTP、停看门狗。 */
     public void shutdown() {
         stopWatcher();
-        stopDelivery();
-        stopRemote();
         PackPublisher current = publisher;
         this.publisher = null;
         if (current != null) {
             current.supersede();
         }
+        stopDelivery();
+        stopRemote();
         scheduler.shutdown();
     }
 }

@@ -49,7 +49,7 @@ delivery:
 community:
   # 社区资源包目录：由发布包里的 community-packs.zip 解压得到
   enabled: true
-  dir: "plugins/ResourcePackService/community"
+  # dir: "plugins/ResourcePackService/community"  # 缺省：Paper 用该路径，Fabric 用 config/resource-pack-service/community
   # 社区包在合成时的层序偏移；具体包的 priority 会叠加在它上面
   priority: 0
   # 服务端 Minecraft 版本（如 1.21.8）；空串表示不额外限制版本，由各包的 minecraft 范围决定

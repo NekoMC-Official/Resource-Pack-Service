@@ -158,7 +158,7 @@ class RpsConfig private constructor(
 
         /** 从 config.yml 读一份快照；相对路径按 serverRoot 解析。 */
         @JvmStatic
-        fun load(config: ConfigSource, serverRoot: Path): RpsConfig {
+        fun load(config: ConfigSource, serverRoot: Path, defaultCommunityDir: Path? = null): RpsConfig {
             val root = serverRoot.toAbsolutePath().normalize()
             val output = root.resolve(config.getString("output.dir", "merged") ?: "merged").normalize()
 
@@ -190,7 +190,11 @@ class RpsConfig private constructor(
             }
 
             val format = parseFormat(config.getString("merge.pack-format", "auto"))
-            val communityDir = root.resolve(config.getString("community.dir", "plugins/ResourcePackService/community") ?: "community").normalize()
+            val communityDir = if (config.isSet("community.dir")) {
+            root.resolve(config.getString("community.dir", "community") ?: "community").normalize()
+        } else {
+            (defaultCommunityDir ?: root.resolve("plugins/ResourcePackService/community")).toAbsolutePath().normalize()
+        }
             val communityMinecraft = (config.getString("community.minecraft", "") ?: "").trim()
             val communityPackFormatValue = config.get("community.pack-format")?.toString()?.trim().orEmpty()
             // 缺省时沿用 merge.pack-format 的具体数字；merge.pack-format 为 auto 时 format 已是 0，即不按格式过滤
@@ -227,7 +231,7 @@ class RpsConfig private constructor(
                 statusFeedbackOn = config.getBoolean("delivery.status-feedback", true),
                 httpOn = config.getBoolean("delivery.http.enabled", true),
                 httpBindAddress = config.getString("delivery.http.bind", "0.0.0.0") ?: "0.0.0.0",
-                httpPortNumber = config.getInt("delivery.http.port", 25580),
+                httpPortNumber = config.getInt("delivery.http.port", 25580).coerceIn(0, 65535),
                 httpUrlPath = config.getString("delivery.http.path", "/pack/merged.zip") ?: "/pack/merged.zip",
                 httpPublicUrl = (config.getString("delivery.http.public-url", "") ?: "").trim(),
             communityOn = config.getBoolean("community.enabled", true),

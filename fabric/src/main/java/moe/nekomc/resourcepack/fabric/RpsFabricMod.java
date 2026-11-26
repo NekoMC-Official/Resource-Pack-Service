@@ -1,6 +1,7 @@
 package moe.nekomc.resourcepack.fabric;
 
 import java.nio.file.Path;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -15,9 +16,11 @@ import net.minecraft.server.level.ServerPlayer;
  *
  * <p>装配顺序按 Fabric 生命周期来：命令先注册（服务端还没起来），
  * SERVER_STARTED 才碰配置与网络，STOPPING 收摊。</p>
+ *
+ * <p>Fabric 不会替我们兜住事件回调里的异常：一个非法端口就能让 SERVER_STARTED
+ * 把服务端带崩。所以每个回调都过 {@link #safe(String, Runnable)}。</p>
  */
 public final class RpsFabricMod implements DedicatedServerModInitializer {
-
     public static final String MOD_ID = "resource-pack-service";
     private static final Logger LOG = FabricLog.get("ResourcePackService");
     private static volatile FabricPlatform platform;
@@ -37,22 +40,34 @@ public final class RpsFabricMod implements DedicatedServerModInitializer {
         platform = created;
 
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
-            FabricCommands.register(dispatcher, created));
+            safe("注册命令", () -> FabricCommands.register(dispatcher, created)));
+        ServerLifecycleEvents.SERVER_STARTED.register(server ->
+            safe("服务器启动", () -> created.attach(server)));
+        ServerTickEvents.END_SERVER_TICK.register(server ->
+            safe("服务器 tick", created::tick));
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
+            safe("玩家进服", () -> {
+                ServerPlayer player = handler.getPlayer();
+                if (player != null) {
+                    created.onJoin(player);
+                }
+            }));
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+            safe("玩家离线", () -> {
+                ServerPlayer player = handler.getPlayer();
+                if (player != null) {
+                    created.onQuit(player.getUUID());
+                }
+            }));
+        ServerLifecycleEvents.SERVER_STOPPING.register(server ->
+            safe("服务器停止", created::shutdown));
+    }
 
-        ServerLifecycleEvents.SERVER_STARTED.register(server -> created.attach(server));
-        ServerTickEvents.END_SERVER_TICK.register(server -> created.tick());
-        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
-            ServerPlayer player = handler.getPlayer();
-            if (player != null) {
-                created.onJoin(player);
-            }
-        });
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-            ServerPlayer player = handler.getPlayer();
-            if (player != null) {
-                created.onQuit(player.getUUID());
-            }
-        });
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> created.shutdown());
+    private static void safe(String what, Runnable action) {
+        try {
+            action.run();
+        } catch (Throwable error) {
+            LOG.log(Level.SEVERE, "[ResourcePackService] " + what + " 处理失败", error);
+        }
     }
 }

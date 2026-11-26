@@ -22,6 +22,9 @@ object PackConflictScanner {
     private const val MAX_FILES = 400
     private const val MAX_TOML_PER_FOLDER = 8
 
+    /** 超长单行不参与正则匹配：回溯代价与行长平方相关，且真实配置不会这么长。 */
+    private const val MAX_LINE_CHARS = 4096
+
     private val CONFIG_NAMES = setOf("config.yml", "config.yaml", "settings.yml", "settings.yaml")
     private val LOOSE_SUFFIXES = listOf(".yml", ".yaml", ".toml", ".properties", ".conf")
 
@@ -159,6 +162,10 @@ object PackConflictScanner {
             }
             val stripped = line.trim()
             if (stripped.isEmpty() || stripped.startsWith("#")) {
+                continue
+            }
+            val lower = line.lowercase(Locale.ROOT)
+                if (line.length > MAX_LINE_CHARS || (!lower.contains("pack") && !lower.contains("join"))) {
                 continue
             }
             val match = KEY_PATTERN.find(line) ?: ASSIGN_PATTERN.find(line) ?: continue

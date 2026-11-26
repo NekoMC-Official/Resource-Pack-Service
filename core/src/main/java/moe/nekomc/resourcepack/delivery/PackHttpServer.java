@@ -5,8 +5,12 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
@@ -39,17 +43,20 @@ public final class PackHttpServer implements AutoCloseable {
     public PackHttpServer(Path zipFile, String bind, int port, String urlPath) {
         this.zipFile = zipFile;
         this.bind = bind == null || bind.isBlank() ? "0.0.0.0" : bind.trim();
-        this.configuredPort = Math.max(0, port);
+        // 端口合法性留到 start 里检查：那里能把失败统一转成 IOException，由调用方降级而不是让插件半死。
+        this.configuredPort = port;
         String path = urlPath == null || urlPath.isBlank() ? "/pack/merged.zip" : urlPath.trim();
         this.urlPath = path.startsWith("/") ? path : "/" + path;
     }
 
     /** 绑定端口并开始服务；port 传 0 时由系统分配，实际端口用 {@link #port()} 取。 */
-    public void start() throws IOException {
+    public synchronized void start() throws IOException {
         if (server != null) {
             return;
         }
-        HttpServer created = HttpServer.create(new InetSocketAddress(bind, configuredPort), 0);
+        if (configuredPort < 0 || configuredPort > 65535) {
+            throw new IOException("delivery.http.port 超出范围：" + configuredPort);
+        }
         AtomicInteger counter = new AtomicInteger();
         ThreadFactory factory = runnable -> {
             Thread thread = new Thread(runnable, THREAD_PREFIX + counter.incrementAndGet());
@@ -57,9 +64,25 @@ public final class PackHttpServer implements AutoCloseable {
             return thread;
         };
         ExecutorService pool = Executors.newFixedThreadPool(8, factory);
-        created.setExecutor(pool);
-        created.createContext("/", this::handle);
-        created.start();
+        HttpServer created = null;
+        try {
+            created = HttpServer.create(new InetSocketAddress(bind, configuredPort), 0);
+            created.setExecutor(pool);
+            created.createContext("/", this::handle);
+            created.start();
+        } catch (IOException error) {
+            if (created != null) {
+                created.stop(0);
+            }
+            pool.shutdownNow();
+            throw error;
+        } catch (RuntimeException error) {
+            if (created != null) {
+                created.stop(0);
+            }
+            pool.shutdownNow();
+            throw new IOException("HTTP 出口启动失败：" + error.getMessage(), error);
+        }
         this.server = created;
         this.executor = pool;
         this.actualPort = created.getAddress().getPort();
@@ -96,16 +119,27 @@ public final class PackHttpServer implements AutoCloseable {
                 exchange.sendResponseHeaders(304, -1);
                 return;
             }
-            long size = Files.size(file);
-            exchange.getResponseHeaders().set("Content-Type", "application/zip");
-            if ("HEAD".equals(method)) {
-                exchange.getResponseHeaders().set("Content-Length", Long.toString(size));
-                exchange.sendResponseHeaders(200, -1);
-                return;
-            }
-            exchange.sendResponseHeaders(200, size);
-            try (OutputStream out = exchange.getResponseBody()) {
-                Files.copy(file, out);
+            // 用同一个句柄取长度并输出：合成换包时也不会把新文件多写或少写到已经声明的长度之外。
+            try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+                long size = channel.size();
+                exchange.getResponseHeaders().set("Content-Type", "application/zip");
+                if ("HEAD".equals(method)) {
+                    exchange.getResponseHeaders().set("Content-Length", Long.toString(size));
+                    exchange.sendResponseHeaders(200, -1);
+                    return;
+                }
+                exchange.sendResponseHeaders(200, size);
+                try (OutputStream out = exchange.getResponseBody()) {
+                    WritableByteChannel target = Channels.newChannel(out);
+                    long position = 0;
+                    while (position < size) {
+                        long moved = channel.transferTo(position, size - position, target);
+                        if (moved <= 0) {
+                            break;
+                        }
+                        position += moved;
+                    }
+                }
             }
         }
     }
@@ -161,7 +195,7 @@ public final class PackHttpServer implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         HttpServer current = server;
         server = null;
         if (current != null) {

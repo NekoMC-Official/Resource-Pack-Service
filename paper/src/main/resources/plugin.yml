@@ -26,6 +26,7 @@ permissions:
       rps.reload: true
       rps.push: true
       rps.community: true
+      rps.conflicts: true
   rps.use:
     description: 允许使用 /rps；普通玩家可 /rps push 给自己重载
     default: true
@@ -52,6 +53,9 @@ permissions:
     default: op
   rps.community:
     description: 管理社区资源包远程索引
+    default: op
+  rps.conflicts:
+    description: 查看第三方资源包冲突
     default: op
   rps.admin:
     description: 管理组，含 build/reload/push/check

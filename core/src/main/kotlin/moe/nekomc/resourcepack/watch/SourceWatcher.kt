@@ -23,16 +23,24 @@ class SourceWatcher(
 ) {
 
     private val stamps = ConcurrentHashMap<Path, String>()
+
+    @Volatile
     private var task: Scheduler.Cancellable? = null
 
+    @Synchronized
     fun start() {
-        if (task != null || intervalSeconds <= 0L) {
+        if (task != null) {
+            return
+        }
+        if (intervalSeconds <= 0L) {
+            host.logger().warning("[资源包] watch.interval-seconds 必须大于 0，来源自动侦测未启动")
             return
         }
         val periodMs = (intervalSeconds * 1000L).coerceAtLeast(1000L)
         task = host.scheduler().runAsyncTimer(periodMs, periodMs, Runnable { tick() })
     }
 
+    @Synchronized
     fun stop() {
         val current = task
         task = null
@@ -41,6 +49,7 @@ class SourceWatcher(
     }
 
     /** 定时快照比较；任何异常都在这里吞掉，否则周期任务会被平台停掉。 */
+    @Synchronized
     fun tick() {
         try {
             val snapshot = paths.get()

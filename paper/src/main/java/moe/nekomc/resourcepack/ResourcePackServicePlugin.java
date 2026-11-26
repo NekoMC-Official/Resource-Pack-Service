@@ -177,7 +177,7 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
         reloadConfig();
         Path serverRoot = getServer().getWorldContainer().toPath().toAbsolutePath().normalize();
         Path dataFolder = getDataFolder().toPath();
-        config = RpsConfig.load(new BukkitConfigSource(getConfig()), serverRoot);
+        config = RpsConfig.load(new BukkitConfigSource(getConfig()), serverRoot, null);
         engineConfig = EngineConfig.load(new BukkitConfigSource(getConfig()), dataFolder);
         stateStore = new StateStore(dataFolder.resolve("state.json"));
 
