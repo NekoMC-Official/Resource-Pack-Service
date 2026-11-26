@@ -19,8 +19,8 @@ zip，合并、版本、缓存、推送、回执全部由本服务统一处理�
 ## 特性
 
 - **多来源合成一份包**：按优先级分层，同一路径高优先级覆盖，相同内容自动去重。
-- **可合并的 JSON**：`assets/<ns>/lang/*.json`、`sounds.json`、`font`、`atlases` 深度合并，
-  其余文件按策略取一份。
+- **可合并的 JSON**：`assets/<ns>/lang/*.json` 与 `assets/<ns>/sounds.json` 按键深度合并；
+  `assets/<ns>/font/*.json` 与 `assets/<ns>/atlases/*.json` 按数组拼接（高层在前、去重）；其余文件按策略取一份。
 - **确定性输出**：相同输入得到逐字节相同的 zip，便于比对 sha1 与缓存。
 - **来源变更自动重建**：轮询来源文件的 mtime，变化后异步重建，不阻塞服务器线程。
 - **自带下载出口**：JDK 内置 HTTP Server，单文件固定路径，支持 ETag / 304。
@@ -154,7 +154,7 @@ community:
 | `merge.policy` | `override` | 路径冲突策略：`override` / `strict` / `first` |
 | `merge.rust.binary` | `bin/rps-pack` | 合并器路径；留空或不存在时用 jar 内置的那份 |
 | `merge.rust.timeout-ms` | `60000` | 单次合并超时，最小 5000 |
-| `merge.json-merge` | `true` | 是否深度合并 lang / sounds / font / atlases |
+| `merge.json-merge` | `true` | 是否合并 lang / sounds.json（按 key 深合并）与 font / atlases（数组拼接），均限 `assets/<ns>/` 下的同名 JSON |
 | `merge.pack-format` | `auto` | `auto` 取所有子包都能接受的交集；也可写具体格式号 |
 | `merge.max-bytes` | `104857600` | 合成包大小上限，超过则本次构建失败并保留上一版 |
 | `merge.description` | `NekoMC 统一资源包` | 写进 `pack.mcmeta` 的 description |
@@ -340,8 +340,8 @@ Release 只提供这一个 jar：编译期当依赖，运行期放进服务端 `
 2. 同一路径：
    - sha1 相同 → 去重，只留一份；
    - 不同 → `override` 取最高层；`first` 取最低层；`strict` 直接失败并报冲突。
-3. 可合并 JSON（`lang`、`sounds.json`、`font`、`atlases`）按键深度合并，
-   数组按「高层在前」拼接并去重。
+3. 可合并 JSON：`assets/<ns>/lang/*.json`、`assets/<ns>/sounds.json` 按键深度合并；
+   `assets/<ns>/font/*.json`、`assets/<ns>/atlases/*.json` 的数组按「高层在前」拼接并去重。
 4. `pack.mcmeta` 不复制任何一份，统一重建：`pack_format` 取所有子包都能接受的交集，
    `description` 用 `merge.description`。
 5. 输出条目按路径升序、时间戳固定为 1980-01-01，保证相同输入逐字节相同。
