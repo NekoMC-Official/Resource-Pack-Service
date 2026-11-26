@@ -7,6 +7,11 @@ plugins {
     id("net.fabricmc.fabric-loom") version "1.19.4"
 }
 
+// 产物名与 Paper 侧同风格，Release 里两个 jar 一眼能分开。
+base {
+    archivesName.set("resource-pack-service-fabric")
+}
+
 // Fabric 适配层：只有这一层允许 import net.minecraft 与 net.fabricmc。
 dependencies {
     minecraft("com.mojang:minecraft:26.3")

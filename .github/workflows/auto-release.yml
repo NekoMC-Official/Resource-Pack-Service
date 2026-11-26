@@ -4,7 +4,9 @@ on:
     branches: [main]
     paths:
       - 'packs/**'
-      - 'src/**'
+      - 'core/**'
+      - 'paper/**'
+      - 'fabric/**'
       - 'rust/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
@@ -163,6 +165,10 @@ jobs:
               git log --oneline -10
             fi
             echo
+            echo "## 产物"
+            echo "- Paper 插件：resource-pack-service-<版本>.jar"
+            echo "- Fabric 模组（仅服务端）：resource-pack-service-fabric-<版本>.jar，需 Fabric Loader 0.20.1+ / Minecraft 26.3"
+            echo
             echo "## 资源包"
             if [ -f build/pack-summary.md ]; then
               cat build/pack-summary.md
@@ -249,7 +255,9 @@ jobs:
           TARGET: ${{ github.sha }}
         run: |
           set -euo pipefail
-          ASSETS=("$(ls build/libs/resource-pack-service-*.jar | head -n1)")
+          PAPER_JAR="$(ls paper/build/libs/resource-pack-service-*.jar | head -n1)"
+          FABRIC_JAR="$(ls fabric/build/libs/resource-pack-service-fabric-*.jar | head -n1)"
+          ASSETS=("$PAPER_JAR" "$FABRIC_JAR")
           if [ -f build/community-packs.zip ]; then
             ASSETS+=("build/community-packs.zip")
             ASSETS+=("build/pack-summary.md")

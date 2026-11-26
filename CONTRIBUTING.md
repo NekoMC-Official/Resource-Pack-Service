@@ -84,7 +84,7 @@ By making a contribution to this project, I certify that:
 
 需要在本仓库加默认来源，走 PR：
 
-1. `src/main/resources/config.yml` 的 `sources:` 下增加条目：`id`、`path`、`priority`。
+1. `paper/src/main/resources/config.yml` 的 `sources:` 下增加条目（Fabric 版读同一份模板）：`id`、`path`、`priority`。
 2. 产出时机特殊（重载时重写、异步生成）时在 `watch/` 补钩子，或在 PR 里说明轮询为何够用。
 3. 加测试：用最小 zip 验证该来源能合入、且不会覆盖掉其它来源的同名条目。
 4. 更新 `docs/design.md` 的来源表。

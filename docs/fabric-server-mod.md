@@ -1,6 +1,6 @@
 # 计划：26.3 Fabric 服务端 mod（同仓库、同分层）
 
-> 状态：计划稿（未开工）。目标是把现有 Paper/Folia 插件的能力 1:1 搬到 **Minecraft 26.3 + Fabric 服务端**，源码进同一个仓库，沿用现有「Java 内核 → Kotlin 胶水 → Rust 合并器」分层。
+> 状态：**已落地并真机验收**（2026-11-27）。Paper 侧能力已 1:1 迁到 Fabric 服务端，实际形态与剩余项见 §12。目标是把现有 Paper/Folia 插件的能力 1:1 搬到 **Minecraft 26.3 + Fabric 服务端**，源码进同一个仓库，沿用现有「Java 内核 → Kotlin 胶水 → Rust 合并器」分层。
 
 ## 1. 目标与非目标
 
@@ -50,17 +50,19 @@
 
 | 文件 | 耦合 |
 | --- | --- |
-| `src/main/java/moe/nekomc/resourcepack/delivery/PackPusher.java` | Player、Listener、PlayerJoinEvent/QuitEvent、PlayerResourcePackStatusEvent、Adventure |
-| `src/main/java/moe/nekomc/resourcepack/ResourcePackServicePlugin.java` | JavaPlugin 生命周期 |
-| `src/main/java/moe/nekomc/resourcepack/api/PackStatusEvent.java` | `extends org.bukkit.event.Event` |
-| `src/main/java/moe/nekomc/resourcepack/core/EngineConfig.java` | `FileConfiguration` |
-| `src/main/java/moe/nekomc/resourcepack/CommunityBindingListener.java` | PluginEnableEvent / PluginDisableEvent |
-| `src/main/kotlin/.../config/RpsConfig.kt` | `FileConfiguration` |
-| `src/main/kotlin/.../watch/SourceWatcher.kt` | Plugin + Folia `ScheduledTask` |
-| `src/main/kotlin/.../pack/PackHost.kt` | `org.bukkit.Server`、Plugin |
-| `src/main/kotlin/.../command/RpsCommand.kt` | CommandExecutor/TabCompleter/CommandSender/Player + Adventure |
-| `src/main/kotlin/.../command/RpsCommandHost.kt` | `org.bukkit.Server` |
-| `src/main/kotlin/.../pack/PackPublisher.kt` | 仅 Adventure MiniMessage（几乎可原样搬） |
+| 原文件（重构前） | 耦合 | 现在的位置 |
+| --- | --- | --- |
+| `delivery/PackPusher.java` | Player、Listener、PlayerJoinEvent/QuitEvent、PlayerResourcePackStatusEvent、Adventure | `paper/src/main/java/moe/nekomc/resourcepack/delivery/PackPusher.java` |
+| `ResourcePackServicePlugin.java` | JavaPlugin 生命周期 | `paper/src/main/java/moe/nekomc/resourcepack/ResourcePackServicePlugin.java` |
+| `api/PackStatusEvent.java` | `extends org.bukkit.event.Event` | `paper/src/main/java/moe/nekomc/resourcepack/api/PackStatusEvent.java` |
+| `core/EngineConfig.java` | `FileConfiguration` | 已进 `:core`，改读 `platform/ConfigSource` |
+| `CommunityBindingListener.java` | PluginEnableEvent / PluginDisableEvent | `paper/src/main/java/moe/nekomc/resourcepack/CommunityBindingListener.java` |
+| `config/RpsConfig.kt` | `FileConfiguration` | `core/src/main/kotlin/.../config/RpsConfig.kt`，已改读 `ConfigSource` |
+| `watch/SourceWatcher.kt` | Plugin + Folia `ScheduledTask` | `core/src/main/kotlin/.../watch/SourceWatcher.kt`，已改走 `platform/Scheduler` |
+| `pack/PackHost.kt` | `org.bukkit.Server`、Plugin | `core/src/main/kotlin/.../pack/PackHost.kt`，只剩平台无关端口 |
+| `command/RpsCommand.kt` | CommandExecutor/TabCompleter/CommandSender/Player + Adventure | `core/src/main/kotlin/.../command/RpsCommand.kt`，已去 Bukkit |
+| `command/RpsCommandHost.kt` | `org.bukkit.Server` | 拆成 `core/.../command/CommandHost.kt` + `paper/.../platform/BukkitCommandBridge.kt` |
+| `pack/PackPublisher.kt` | 仅 Adventure MiniMessage | `core/src/main/kotlin/.../pack/PackPublisher.kt`，已改走 `PlayerRef` |
 
 `merge/*`、`delivery/PackHttpServer.java`、`delivery/DeliveryStatusStore.java`、`core/{Hashing,SourceRegistry,StateStore,ZipSource}` 无平台依赖，直接进 `:core`。
 
@@ -71,18 +73,18 @@
 ```
 resource-pack-service/
 ├─ settings.gradle.kts          # include(":core", ":paper", ":fabric")
-├─ core/                        # 平台无关内核（java-library + kotlin，adventure 作为普通依赖）
-│   └─ src/main/{java,kotlin}/moe/nekomc/resourcepack/{merge,delivery,core,config,command,pack,watch,api}
-│   └─ src/test/...             # 90 项左右的无 Bukkit 测试
-├─ paper/                       # 现有插件（Bukkit 适配层）
-│   ├─ src/main/java/.../ResourcePackServicePlugin.java
-│   ├─ src/main/java/.../paper/*Adapter*.java   # 新增：Bukkit 实现 SPI
-│   ├─ src/main/resources/plugin.yml
-│   └─ src/test/...             # PluginDescriptorTest、RpsConfig(Bukkit) 测试
-├─ fabric/                      # 新增：Fabric 26.3 服务端 mod
-│   ├─ build.gradle.kts         # loom + shadow + remapJar
+├─ core/                        # 平台无关内核（java-library + kotlin，不依赖 Bukkit / Adventure）
+│   ├─ src/main/java/moe/nekomc/resourcepack/{api,core,delivery,merge,pack,platform}
+│   ├─ src/main/kotlin/moe/nekomc/resourcepack/{command,config,core,merge,pack,watch}
+│   └─ src/test/...             # 92 项里的 85 项
+├─ paper/                       # Paper / Folia 适配层
+│   ├─ src/main/java/moe/nekomc/resourcepack/{ResourcePackServicePlugin.java,delivery,api,platform}
+│   ├─ src/main/kotlin/moe/nekomc/resourcepack/{command,platform}
+│   ├─ src/main/resources/{plugin.yml,config.yml}
+│   └─ src/test/...             # PluginDescriptorTest、RpsConfigAnnounceRequiredTest
+├─ fabric/                      # Fabric 26.3 服务端 mod（loom + JiJ，不用 shadow / remapJar）
 │   └─ src/main/{java,resources}/...
-├─ rust/rps-pack/               # 不变，两平台共用（构build 时各自暂存进 jar 的 rps-pack/bin）
+├─ rust/rps-pack/               # 两平台共用，构建时各自暂存进 jar 的 rps-pack/bin
 └─ tools/, packs/, docs/
 ```
 
@@ -202,7 +204,7 @@ tasks.remapJar { inputFile.set(tasks.shadowJar.flatMap { it.archiveFile }) }
 
 - Rust 合并器：复用根工程 `stageRustBinary`，把 `build/dist/bin/rps-pack-<os>-<arch>[.exe]` 打进 `rps-pack/bin`（与 Paper 版同一段逻辑，抽成 `buildSrc` 里的函数）。
 - 产物名：`resource-pack-service-<ver>.jar` / `resource-pack-service-fabric-<ver>.jar`。
-- `.github/workflows/auto-release.yml` 现在用 `ls build/libs/resource-pack-service-*.jar | head -n1`，**会撞两个包** → 改成显式两份（paper 用 `resource-pack-service-[0-9]*.jar`，fabric 用 `*-fabric-*.jar`），Release 资产同时上传。
+- `.github/workflows/auto-release.yml` 原用 `ls build/libs/resource-pack-service-*.jar | head -n1`，**会撞两个包**（已在 §12.6 落地为显式两份） → 改成显式两份（paper 用 `resource-pack-service-[0-9]*.jar`，fabric 用 `*-fabric-*.jar`），Release 资产同时上传。
 - CI：`ci.yml` 加 `:fabric:build`；CodeQL 保持 Java/Kotlin。
 - 版本号：`fabric.mod.json` 的 `version` 用 `processResources expand`（与 Paper `plugin.yml` 一致）。
 
@@ -256,7 +258,7 @@ P0–P3 已落地并在真机跑通，P5（发行/CI）与 P6（对外文档）�
 | --- | --- | --- |
 | shadow + `remapJar` 吃 shadow 输出 | **不用 shadow**：`include(project(":core"))` / `include("org.jetbrains.kotlin:kotlin-stdlib:2.4.21")` / `include("org.yaml:snakeyaml:2.4")`，loom 打出 `META-INF/jars/*` | 构建日志里根本没有 `remapJar` 任务；loom 1.19.4 对 26.3 不做 remap |
 | 需要 refmap | **不需要**：26.3 生产 jar 类名明文（`minecraft-26.3-client.jar` 里 11266 个 `net/minecraft/` 条目可读） | 26.x 已不混淆，mixin 按方法名直接匹配 |
-| 产物 `resource-pack-service-fabric-<ver>.jar` | 目前是 loom 默认的 `fabric/build/libs/fabric-0.1.0.jar`，改名前先别动 auto-release | 见 12.6 |
+| 产物 `resource-pack-service-fabric-<ver>.jar` | 已按计划落地：`base { archivesName.set("resource-pack-service-fabric") }`，输出 `fabric/build/libs/resource-pack-service-fabric-<ver>.jar` | 与 Paper 产物同风格，Release 里一眼区分 |
 
 其它固定项：loom `1.19.4`、MC `26.3`、loader `0.20.1`、fabric-api `0.167.0+26.3`、toolchain 26 / `release 25`、Rust 二进制由 `:fabric:stageRustBinary` 打进 `rps-pack/bin/rps-pack-windows-x86_64.exe`。
 
@@ -303,9 +305,18 @@ P0–P3 已落地并在真机跑通，P5（发行/CI）与 P6（对外文档）�
 
 环境坑：26.3 生成的 `server.properties` 里 **`white-list` 默认 `true`**，空 `whitelist.json` 会把客户端挡在"你不在此服务器的白名单中"；测试服已 `whitelist add` 并改回 `white-list=false`。
 
-### 12.5 未验证 / 待办
+### 12.5 剩余项
 
-- Fabric 侧「`required=true` + `announce-required=false` + 客户端档位 Disabled」的静默 DECLINED → 服务端踢人（Paper 侧 T6 已验证，Fabric 只做了代码对齐）。
-- `/rps conflicts` 在 Fabric 恒返回无扫描根（`conflictScanRoot()` 返回 null），Pl3 期再定是否需要 `mods/` 扫描。
-- P5：CI 加 `:fabric:build`、Release 同时出两个 jar（`auto-release.yml` 现在的 `ls build/libs/resource-pack-service-*.jar | head -n1` 只取 Paper 那个）。
-- P6：README / `docs/integration.md` 补 Fabric 段（装法、`config/resource-pack-service/config.yml` 路径、JiJ 不需要额外装 Kotlin）。
+- `/rps conflicts` 在 Fabric 恒返回无扫描根（`conflictScanRoot()` 返回 null）。Paper 版扫 `plugins/`，Fabric 要扫 `mods/` + `config/` 才有同等能力，未实现。
+- `deploy.yml` 的 `fabric` 变体把 jar 投到 `mods/`，而 `DEPLOY_PLUGINS_DIR` 是单一目录 secret；两个变体需要分别配置，或后续拆成两个 secret。
+- 跨平台发布同 Paper：Fabric jar 只在构建平台带对应 `rps-pack`，Windows 产物不能直接用于 Linux 服务端。
+
+### 12.6 已完成收尾（2026-11-27）
+
+- **静默踢人已真机确认**（用户手动验证）：`provider.required: true` + `announce-required: false` + 客户端「服务器资源包」档位 Disabled → 不弹窗，服务端按 `reject-message` 断开。
+- 产物改名：`fabric/build.gradle.kts` 加 `base { archivesName.set("resource-pack-service-fabric") }`，输出 `fabric/build/libs/resource-pack-service-fabric-<ver>.jar`。
+- CI（`ci.yml`）：上传 `resource-pack-service-paper-linux-x86_64` 与 `resource-pack-service-fabric-linux-x86_64` 两个 artifact（原先 `build/libs/` 路径在多模块下已失效，本次一并修正）。
+- Auto Release：触发路径加 `core/**`、`paper/**`、`fabric/**`；发行资产同时带 Paper 与 Fabric 两个 jar；发行说明新增「产物」段。
+- Release：每个平台产出 `resource-pack-service-<ver>-<platform>.jar` 与 `resource-pack-service-fabric-<ver>-<platform>.jar`。
+- Deploy：新增 `variant`（paper / fabric）输入，按变体挑 jar，落地名分别为 `resource-pack-service.jar` / `resource-pack-service-fabric.jar`。
+- 文档：README 安装段拆 Paper / Fabric 两节、构建产物与目录结构按模块重写；`docs/ci.md` 的 CI / Release / Deploy / Auto Release 段同步；`docs/integration.md` 新增「Fabric 服务端」说明（无第三方注册入口）。

@@ -11,6 +11,11 @@ on:
         type: choice
         options: [linux-x86_64, windows-x86_64]
         default: linux-x86_64
+        variant:
+          description: '产物类型'
+          type: choice
+          options: [paper, fabric]
+          default: paper
 
 permissions:
   contents: read
@@ -36,9 +41,17 @@ jobs:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
           DIR: ${{ secrets.DEPLOY_PLUGINS_DIR }}
+          VARIANT: ${{ inputs.variant }}
         run: |
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
-          scp dist/*.jar "$USER@$HOST:$DIR/resource-pack-service.jar.new"
-          ssh "$USER@$HOST" "cd '$DIR' && if [ -f resource-pack-service.jar ]; then cp resource-pack-service.jar resource-pack-service.jar.bak-\$(date +%Y%m%d%H%M%S); fi && mv resource-pack-service.jar.new resource-pack-service.jar && sha256sum resource-pack-service.jar"
+          if [ "$VARIANT" = "fabric" ]; then
+            SRC="$(ls dist/resource-pack-service-fabric-*.jar | head -n1)"
+            NAME=resource-pack-service-fabric.jar
+          else
+            SRC="$(ls dist/resource-pack-service-[0-9]*.jar | head -n1)"
+            NAME=resource-pack-service.jar
+          fi
+          scp "$SRC" "$USER@$HOST:$DIR/$NAME.new"
+          ssh "$USER@$HOST" "cd '$DIR' && if [ -f $NAME ]; then cp $NAME $NAME.bak-\$(date +%Y%m%d%H%M%S); fi && mv $NAME.new $NAME && sha256sum $NAME"
       - name: Reminder
         run: echo '已投递但未重启：按部署流程在维护窗口 COLD 重启，先跑 /rps check。'

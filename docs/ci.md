@@ -6,15 +6,15 @@
 
 - 触发：推送到 `main`、任意 Pull Request、手动 `workflow_dispatch`。
 - 环境：`ubuntu-latest` + Python 3.12 + Zulu JDK 26 + Rust stable。
-- 步骤：`python -m unittest discover -s tools`（绑定选择与变体规则）→ `cargo test` → `cargo build --release` → `./gradlew build`（通过 `RPS_PACK_BIN` 指向刚编出的合并器）→ 上传 `resource-pack-service-<版本>.jar`（默认 `0.1.0`，工作流内可用 `-Pversion=` 覆盖）。
+- 步骤：`python -m unittest discover -s tools`（绑定选择与变体规则）→ `cargo test` → `cargo build --release` → `./gradlew build`（一次构建 Paper 与 Fabric 两个模块，`RPS_PACK_BIN` 指向刚编出的合并器）→ 上传两个产物：`resource-pack-service-<版本>.jar`（Paper/Folia）与 `resource-pack-service-fabric-<版本>.jar`（Fabric 服务端）。默认版本 `0.1.0`，工作流内可用 `-Pversion=` 覆盖。
 - 构建机是 Linux，所以产物里的内置合并器是 **linux-x86_64**，可直接部署到 Linux 服务端。
 
 ## Release（`release.yml`）
 
 - 触发：推送 `v*` 标签，例如 `git tag v0.1.0 && git push origin v0.1.0`。
-- 矩阵：`ubuntu-latest` 产出 `resource-pack-service-<版本>-linux-x86_64.jar`，`windows-latest` 产出 `...-windows-x86_64.jar`。
-- 版本号通过 `-Pversion=` 注入 Gradle，`plugin.yml` 里的 `version` 与 jar 文件名（`resource-pack-service-<版本>.jar`）都会跟着变。
-- 两个 jar 自动附加到对应 GitHub Release，并生成发行说明。
+- 矩阵：每个平台产出两个 jar —— `resource-pack-service-<版本>-<平台>.jar` 与 `resource-pack-service-fabric-<版本>-<平台>.jar`；`ubuntu-latest` → `linux-x86_64`，`windows-latest` → `windows-x86_64`。
+- 版本号通过 `-Pversion=` 注入 Gradle，`plugin.yml` 的 `version`、`fabric.mod.json` 的 `version` 与两个 jar 的文件名都会跟着变。
+- 四个 jar 全部附加到对应 GitHub Release，并生成发行说明。
 
 > jar 内只带**构建平台**的 `rps-pack`。Linux 服务端请用 linux 产物；Windows 产物只用于 Windows 服务端或在 Windows 上做合并。
 
@@ -26,6 +26,7 @@
 |---|---|
 | `tag` | 已发布的标签，例如 `v0.1.0` |
 | `platform` | `linux-x86_64`（默认）或 `windows-x86_64` |
+| `variant` | `paper`（默认）或 `fabric`，决定挑哪个 jar、落地文件叫什么名字 |
 
 需要的仓库 Secrets：
 
@@ -36,7 +37,7 @@
 | `DEPLOY_SSH_KEY` | 私钥（对应公钥已加入目标机 `authorized_keys`） |
 | `DEPLOY_PLUGINS_DIR` | 插件目录，例如 `/srv/nekomc-folia/server/plugins` |
 
-工作流会先把现有 jar 备份成 `resource-pack-service.jar.bak-<时间戳>`，再原子替换，并输出远端 `sha256sum`。
+工作流按 `variant` 挑出对应 jar，把现有同名文件备份成 `<名字>.bak-<时间戳>`，再原子替换，并输出远端 `sha256sum`。Paper 变体落地名是 `resource-pack-service.jar`，Fabric 变体是 `resource-pack-service-fabric.jar`（`DEPLOY_PLUGINS_DIR` 此时要指向 `mods/`）。
 
 建议在仓库 Settings → Environments 里给 `production` 配置 Required reviewers，避免误触。
 
@@ -51,13 +52,13 @@ git tag v0.1.0
 git push origin v0.1.0
 
 # 3. 等 Release 工作流产出一个 Linux jar
-# 4. 手动跑 Deploy，填 tag 与 linux-x86_64
+# 4. 手动跑 Deploy，填 tag、平台与变体（paper / fabric）
 # 5. 维护窗口 COLD 重启，启动后执行 /rps check 与 /rps status
 ```
 
 ## 本地构建与 CI 的差异
 
-- 本地在 Windows 上构建，jar 内置的是 `rps-pack-windows-x86_64.exe`，不能拿到 Linux 服务端跑。
+- 本地在 Windows 上构建，两个 jar 内置的都是 `rps-pack-windows-x86_64.exe`，不能拿到 Linux 服务端跑；产物分别在 `paper/build/libs/` 与 `fabric/build/libs/`。
 - 发布用 jar 一律以 Release 工作流的 Linux 产物为准。
 - 本地没有 `cargo` 时 `./gradlew build` 仍能过，但 jar 内没有合并器，运行期构建资源包会报错；发布前确认 CI 的 Rust 步骤为绿。
 
@@ -72,8 +73,8 @@ git push origin v0.1.0
 
 ## Auto Release（`auto-release.yml`）
 
-- 触发：`main` 上改动 `packs/**`、`src/**`、`rust/**`、`build.gradle.kts`、`settings.gradle.kts`、`tools/packs.py` 或 `auto-release.yml` 自身；也可手动触发。
-- 发行计划：`tools/packs.py plan` 以最近 `v*` 标签为基线，用 `git cat-file` 判断包在上个版本是否已存在，用 `git diff` 判断 `src`、`rust`、构建脚本等代码路径是否有变更。
+- 触发：`main` 上改动 `packs/**`、`core/**`、`paper/**`、`fabric/**`、`rust/**`、`build.gradle.kts`、`settings.gradle.kts`、`tools/packs.py` 或 `auto-release.yml` 自身；也可手动触发。
+- 发行计划：`tools/packs.py plan` 以最近 `v*` 标签为基线，用 `git cat-file` 判断包在上个版本是否已存在，用 `git diff` 判断 `core`、`paper`、`fabric`、`rust`、构建脚本等代码路径是否有变更。
 - 新包闸门：新增的 `release: auto` 包不会自动批准；维护者必须手动触发工作流，并在 `force_packs` 输入里点名一次。只新增包、没有代码变更时 `should_release=false`，后续构建与发布步骤全部跳过，不会创建版本。
 - 打包：只把 `approved-packs.txt` 里的包传给 `packs.py bundle --only`；未批准、未点名的包不会进入 `community-packs.zip`。如果批准集合的绑定关系不完整（例如 addon 缺同插件 official），工作流直接失败。
 - 包变更闸门：`plan` 额外输出 `packs_changed`（`force_packs` 点名、已批准包内容变更、新批准包，或上个标签里的包被删除/撤出时为 true）。为 false 时只发插件 jar，跳过 `community-packs.zip`、索引上传与 Pages 部署。
@@ -82,7 +83,7 @@ git push origin v0.1.0
 - Pages：仓库的 Pages Source 必须设为 GitHub Actions；工作流需要 `pages: write` 与 `id-token: write`。
 - 服务端消费：把 `community.remote.enabled` 设为 `true`，插件会定时拉取索引，只下载本机已安装插件对应的包，全部下载与 sha1 校验通过后才整体切换 `manifest.json`，失败保留旧清单与旧包；`/rps community update` 可立即检查。离线部署仍可用 `community-packs.zip`。
 - 版本：取最近 `v*` 标签后补丁号加一；还没有标签时从 `v0.1.0` 开始。发行说明列出上次标签以来的提交与资源包报告。
-- 产物：Linux 版插件 jar（内含 `moe.nekomc.resourcepack.api` 接口，供联动插件编译期依赖）；有已批准资源包时再加 `community-packs.zip`、`pack-summary.md` 与 `community-index.json`；只有撤包时只更新索引，不生成 `community-packs.zip`。索引会部署到 Pages。
+- 产物：两个 Linux 版 jar —— `resource-pack-service-<版本>.jar`（Paper/Folia）与 `resource-pack-service-fabric-<版本>.jar`（Fabric 服务端），都内含 `moe.nekomc.resourcepack.api` 接口，供联动插件编译期依赖；有已批准资源包时再加 `community-packs.zip`、`pack-summary.md` 与 `community-index.json`；只有撤包时只更新索引，不生成 `community-packs.zip`。索引会部署到 Pages。
 - 跳过：提交信息含 `[skip release]`，或提交者是 Dependabot。
 - 循环保护：机器人用 `GITHUB_TOKEN` 创建标签与 Release 不会再次触发工作流；手动推 `v*` 标签仍走原来的 `release.yml` 双平台矩阵。
 

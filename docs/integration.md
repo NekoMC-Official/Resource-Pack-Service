@@ -197,6 +197,17 @@ curl -fL --retry 3 -o plugins/Resource\ Pack\ Service/remote.zip \
 第一次需要维护者在 Auto Release 的 `force_packs` 里批准。规范见
 [packs/README.md](../packs/README.md)。
 
+## Fabric 服务端
+
+Fabric 版与 Paper 版共用同一套内核（`:core`），但**没有对外注册入口**：`ResourcePackService` 在 Paper 侧通过
+`ServicesManager` 注册（`paper/src/main/java/moe/nekomc/resourcepack/ResourcePackServicePlugin.java:151`），
+Fabric 没有等价机制，`FabricPlatform` 只在内部装配来源。
+
+因此 Fabric 服务端上，给本服务供包只能用 `config/resource-pack-service/config.yml` 的 `sources`（即「方式三」），
+不能在代码里 `register`。要在 Fabric 上补同等 API，需要在 `RpsFabricMod` 里加自定义事件或暴露 mod 级入口，目前没有做。
+
+两个版本的 jar 都内置 `moe.nekomc.resourcepack.api`，编译期依赖任选其一即可；只有 Paper 运行期能通过 `ServicesManager` 取到实现。
+
 ## 选型表
 
 | 场景 | 选哪种 | 原因 |

@@ -930,7 +930,7 @@ def main():
     plan.add_argument("--github-output", default="")
     plan.add_argument(
         "--code-paths",
-        default="src,rust,build.gradle.kts,settings.gradle.kts,tools/packs.py,.github/workflows/auto-release.yml",
+        default="core,paper,fabric,rust,build.gradle.kts,settings.gradle.kts,tools/packs.py,.github/workflows/auto-release.yml",
     )
     plan.set_defaults(func=cmd_plan)
 

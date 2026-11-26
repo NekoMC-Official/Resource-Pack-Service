@@ -75,6 +75,17 @@ flowchart LR
 
 ## 安装
 
+两个版本，按服务端类型装其中一个，不要同时装：
+
+| 服务端 | 产物 | 放到 | 配置 |
+| --- | --- | --- | --- |
+| Paper / Folia 26.3 | `resource-pack-service-<版本>.jar` | `plugins/` | `plugins/ResourcePackService/config.yml` |
+| Fabric 26.3（仅服务端） | `resource-pack-service-fabric-<版本>.jar` | `mods/` | `config/resource-pack-service/config.yml` |
+
+两个版本共用同一套配置键（`provider` / `merge` / `delivery` / `sources` / `watch` / `push` / `community`），文档里的配置示例两边通用。
+
+### Paper / Folia
+
 1. 把 `resource-pack-service-<版本>.jar` 放进服务端 `plugins/`（文件名不影响加载，带版本号便于核对）。
 2. 启动一次，生成 `plugins/ResourcePackService/config.yml`。从 0.1.6 起插件名改为无空格的 `ResourcePackService`（Paper 26.x 拒绝带空格的描述符）；首次启动会把旧目录 `plugins/Resource Pack Service` 的内容自动迁移过来。
 3. 按需改下载出口与来源，然后 **COLD 重启**（Bukkit 插件不支持热装）。
@@ -87,8 +98,16 @@ flowchart LR
 
    原版会在配置阶段抢先推旧包；`resource-pack-id` 还会派生第二个 UUID，导致客户端装两份。
 
-本插件没有任何 `depend` / `softdepend`，可以单独存在。只要同目录没有第二个会
+Paper 版没有任何 `depend` / `softdepend`，可以单独存在。只要同目录没有第二个会
 `setResourcePack` 的插件，它就是唯一出口。
+
+### Fabric（仅服务端）
+
+1. `mods/` 里放 `resource-pack-service-fabric-<版本>.jar`，外加 Fabric API（26.3 用 `fabric-api-0.167.0+26.3` 或更新版本）。
+2. 需要 Fabric Loader 0.20.1+。Kotlin 运行时、内核与 `rps-pack` 合并器都嵌在 mod 里，服务端不用另装前置；玩家侧什么都不用装（`environment: "server"`）。
+3. 首次启动生成 `config/resource-pack-service/config.yml`，默认模板与 Paper 版共用，键名与语义完全一致。
+4. `server.properties` 的 `resource-pack=`、`resource-pack-id=` 同样留空。
+5. 社区包按**已加载的 mod id** 判断是否适用（对应 Paper 侧的插件判断）；Bukkit 的插件认领事件在 Fabric 上没有等价物，`community-bind` 相关能力不提供，远程索引与手工 `sources` 正常可用。
 
 ### 下载地址怎么定
 
@@ -452,9 +471,12 @@ community:
 
 产物：
 
-- `build/libs/resource-pack-service-<版本>.jar`：可直接部署，内含当前平台的 `rps-pack`，文件名带 Gradle `version`（CI 用 `-Pversion=` 注入，本地缺省 `0.1.0`）。
+- `paper/build/libs/resource-pack-service-<版本>.jar`：Paper / Folia 插件。
+- `fabric/build/libs/resource-pack-service-fabric-<版本>.jar`：Fabric 服务端 mod，内含 `:core`、Kotlin 运行时、SnakeYAML 与同一份 `rps-pack`。
 
-构建只产出这一个 jar：`moe.nekomc.resourcepack.api` 接口已打在本体内，下游插件编译期依赖与运行期部署用的是同一个文件，不再有独立的 api jar，也不再保留 plain jar。
+两个文件名都带 Gradle `version`（CI 用 `-Pversion=` 注入，本地缺省 `0.1.0`）。
+
+每个产物都是**单个 jar**：`moe.nekomc.resourcepack.api` 接口已打在本体内，下游插件编译期依赖与运行期部署用的是同一个文件，不再有独立的 api jar，也不再保留 plain jar。
 
 `rps-pack` 按构建机平台选一份塞进 jar（Windows / Linux / macOS × x86_64 / aarch64）。
 **在 Windows 上打的包内置的是 Windows 合并器，不能直接部署到 Linux 服务端**；
@@ -466,22 +488,26 @@ community:
 ## 目录结构
 
 ```text
-src/main/java/moe/nekomc/resourcepack/
-  ResourcePackServicePlugin.java   插件入口、服务注册、生命周期
+core/src/main/java/moe/nekomc/resourcepack/
   api/                             对外标准 API（纯 JDK 类型）
-  delivery/                        HTTP 出口、进服推送、回执、sha1 工具
-  merge/                           rps-pack 进程调用、内置二进制解出
-  pack/                            Host / HostStatus / PackSnapshot / EntryManifest
-                                   PackConflictScanner / CommunityPack / CommunitySelection
-                                   CommunitySkip / SelectionContext
-src/main/kotlin/moe/nekomc/resourcepack/
-  config/ core/ merge/ pack/ watch/ command/
+  core/ delivery/ merge/ pack/     引擎配置、状态存储、合并器调用、来源注册表、冲突扫描
+  platform/                        ConfigSource / Scheduler / PlayerRef / PackDelivery 端口
+core/src/main/kotlin/moe/nekomc/resourcepack/
+  command/ config/ core/ merge/ pack/ watch/   编排层，不依赖任何服务端平台
+paper/src/main/{java,kotlin}/moe/nekomc/resourcepack/
+  ResourcePackServicePlugin.java   Paper 入口、服务注册、生命周期
+  platform/                        Bukkit / Folia 适配（配置、调度、玩家、命令桥）
+fabric/src/main/java/moe/nekomc/resourcepack/fabric/
+  RpsFabricMod.java                Fabric 入口（DedicatedServerModInitializer）
+  FabricPlatform.java              PackHost + CommandHost 实现
+  FabricPackDelivery.java          发包、回执状态、必装断开
+  mixin/                           回执钩子（ServerCommonPacketListenerImpl）
 rust/rps-pack/                     Rust 合并器与集成测试
 tools/packs.py                     社区资源包校验、打包、bundle 与索引生成
 packs/                             社区资源包
 ```
 
-## 文档
+
 
 - [docs/design.md](docs/design.md)：架构、契约、合并语义、里程碑与风险
 - [docs/integration.md](docs/integration.md)：四种接入方式与冲突处理
