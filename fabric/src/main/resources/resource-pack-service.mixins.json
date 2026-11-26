@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "package": "moe.nekomc.resourcepack.fabric.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [],
+  "server": [
+    "ServerCommonPacketListenerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

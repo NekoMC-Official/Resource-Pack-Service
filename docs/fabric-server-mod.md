@@ -157,6 +157,8 @@ public interface PackDelivery {
 
 ## 6. Fabric 适配层清单
 
+> 本节是立项时的设想。实际落地的文件与构建形态见 §12，两处不一致的地方以 §12 为准。
+
 | 文件（fabric/src/main/java/moe/nekomc/resourcepack/fabric/） | 职责 |
 | --- | --- |
 | `RpsFabricMod.java` | `ModInitializer`：读配置 → 建 `PackHost` → 注册生命周期 |
@@ -243,3 +245,67 @@ tasks.remapJar { inputFile.set(tasks.shadowJar.flatMap { it.archiveFile }) }
 1. Fabric 版是否也要 `announce-required` 这个开关（建议：要，语义与 Paper 完全一致）。
 2. Fabric 版命令权限用 op 等级 2 是否够（不引 `fabric-permissions-api`）。
 3. 是否需要在 Fabric 版保留「玩家拒绝后给提示」这条聊天消息（Paper 版现在是 `push.mode` 相关逻辑）。
+
+## 12. 实施记录（2026-11-27）
+
+P0–P3 已落地并在真机跑通，P5（发行/CI）与 P6（对外文档）未做。
+
+### 12.1 实际构建形态（与 §7 计划的差异）
+
+| 计划 | 实际 | 原因 |
+| --- | --- | --- |
+| shadow + `remapJar` 吃 shadow 输出 | **不用 shadow**：`include(project(":core"))` / `include("org.jetbrains.kotlin:kotlin-stdlib:2.4.21")` / `include("org.yaml:snakeyaml:2.4")`，loom 打出 `META-INF/jars/*` | 构建日志里根本没有 `remapJar` 任务；loom 1.19.4 对 26.3 不做 remap |
+| 需要 refmap | **不需要**：26.3 生产 jar 类名明文（`minecraft-26.3-client.jar` 里 11266 个 `net/minecraft/` 条目可读） | 26.x 已不混淆，mixin 按方法名直接匹配 |
+| 产物 `resource-pack-service-fabric-<ver>.jar` | 目前是 loom 默认的 `fabric/build/libs/fabric-0.1.0.jar`，改名前先别动 auto-release | 见 12.6 |
+
+其它固定项：loom `1.19.4`、MC `26.3`、loader `0.20.1`、fabric-api `0.167.0+26.3`、toolchain 26 / `release 25`、Rust 二进制由 `:fabric:stageRustBinary` 打进 `rps-pack/bin/rps-pack-windows-x86_64.exe`。
+
+### 12.2 实际文件清单（`fabric/src/main/`，13 个源文件 + 2 个资源）
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `fabric/RpsFabricMod.java` | 57 | `DedicatedServerModInitializer`：启动自检、命令注册、生命周期与加入/退出事件接线 |
+| `fabric/FabricPlatform.java` | 555 | `PackHost + CommandHost` 实现：配置装配、HTTP 出口、watcher、社区包、reload 顺序、`runOnServer` |
+| `fabric/FabricPackDelivery.java` | 293 | 发包、回执状态映射、去重、必装踢人、状态提示 |
+| `fabric/FabricConfigSource.java` | 117 | SnakeYAML `Map` 上的 `ConfigSource`，点号取值、类型回退 |
+| `fabric/TickScheduler.java` | 138 | 自建 `Scheduler`：主线程 tick 扫到期任务，任务跑守护线程池 |
+| `fabric/MiniMessages.java` | 103 | MiniMessage 极小子集 → 原版 `Component`（无 Adventure） |
+| `fabric/FabricCommands.java` | 63 | Brigadier `/rps`（greedy 参数）+ 内核补全 |
+| `fabric/FabricCommandSender.java` | 50 | `CommandSourceStack` → `CommandSenderRef`，权限用 op 表折算 |
+| `fabric/FabricPlayerRef.java` | 24 | `ServerPlayer` → `PlayerRef` |
+| `fabric/FabricLog.java` | 54 | JUL → slf4j 桥（内核用 JUL，不桥接就只进 stdout、不进 `logs/latest.log`） |
+| `fabric/CompatibilityCheck.java` | 40 | 启动时反射确认 `handleResourcePackResponse` 仍在，防 mixin 静默失效 |
+| `fabric/mixin/ServerCommonPacketListenerMixin.java` | 32 | `@Inject(at = HEAD)`，只观测不取消 |
+| `resources/fabric.mod.json` | 22 | id/entrypoint/mixins/depends |
+| `resources/resource-pack-service.mixins.json` | 12 | `server: [ServerCommonPacketListenerMixin]` |
+
+内核侧配套改动：`core` 新增 `command/CommandSenderRef.kt`、`command/CommandHost.kt`，`RpsCommand.kt` 从 Paper 模块搬进 core 并去掉 Bukkit 依赖；`PackDelivery` 补 `baseUrl/publish/name/detail/recent`；`DeliveryStatusStore` 的 `record/status/hash/recent/remove` 改为 public。Paper 侧新增 `platform/{BukkitConfigSource,BukkitPlayerRef,FoliaScheduler,BukkitCommandSender,BukkitCommandBridge}`。
+
+### 12.3 实施中踩到的三个真问题
+
+1. **`InetAddress.getLocalHost()` 给出 169.254 链路本地地址** → 推送地址变成客户端连不上的 `http://169.254.31.232:25581/...`。已在 `FabricPackDelivery` 加 `localAddress()`：优先站点内网 IPv4，其次其它非回环 IPv4，最后才回退本机名；实测变成 `http://192.168.31.24:25581/pack/merged.zip?v=1`。
+2. **同一次回执被投递两遍**：26.3 的 `handleResourcePackResponse` 在 Netty 线程与主线程各走一次，mixin 的 HEAD 注入会进两次（日志里一行 `Netty NIO IO #2`、一行 `Server thread`）。已在 `onResponse` 里按 `(玩家, 状态, sha1)` 去重，避免重复日志与 `required` 时重复排程断开。
+3. **JUL 日志不进 `logs/latest.log`**：内核的 `PackHost.logger()` 是 `java.util.logging.Logger`，Fabric 默认只写 stdout，排查时在服务器日志里什么都看不到。已加 `FabricLog` 把 JUL 记录转交 slf4j。
+
+### 12.4 真机验证（2026-11-27 01:23 / 01:26，`server-fabric` 25566）
+
+配置：`provider.required: false` + `announce-required: true`，客户端档位保持默认（Prompt）。
+
+| 观察点 | 结果 |
+| --- | --- |
+| 进服弹窗 | 必装框：中文原版两行 + `来自服务器的消息：Fabric 测试：请点「继续」加载资源包`（黄色），按钮「继续 / 断开连接」 |
+| 点「继续」后下载 | `netstat` 见 `192.168.31.24 → :25581 TIME_WAIT`，服务端无 404 |
+| 服务端回执 | `[01:26:41] [Netty NIO IO #3/INFO]: [资源包] 玩家 Sakana07X 已加载资源包`（去重后仅 1 行；去重前是 Netty + Server thread 各 1 行） |
+| 推送次数 | `[01:26:38] ... 向玩家 Sakana07X 推送资源包（必装提示=true）` 仅 1 行 |
+| 命令层（RCON） | `/rps status`、`/rps list`、`/rps diff`、`/rps push`、`/rps build` 全部返回中文结果 |
+| 合成与出口 | `merged/merged.zip` 538 B、第 1 版、sha1 `50d39a64b862271c2958bef0e7bcc272531cd0a2`、格式 97（97–97）、引擎 rust；`curl` → `200 538` |
+| 日志落点 | 桥接后内核日志出现在 `logs/latest.log`（`[resource-pack-service-1/INFO]`、`[Netty NIO IO #3/INFO]`） |
+
+环境坑：26.3 生成的 `server.properties` 里 **`white-list` 默认 `true`**，空 `whitelist.json` 会把客户端挡在"你不在此服务器的白名单中"；测试服已 `whitelist add` 并改回 `white-list=false`。
+
+### 12.5 未验证 / 待办
+
+- Fabric 侧「`required=true` + `announce-required=false` + 客户端档位 Disabled」的静默 DECLINED → 服务端踢人（Paper 侧 T6 已验证，Fabric 只做了代码对齐）。
+- `/rps conflicts` 在 Fabric 恒返回无扫描根（`conflictScanRoot()` 返回 null），Pl3 期再定是否需要 `mods/` 扫描。
+- P5：CI 加 `:fabric:build`、Release 同时出两个 jar（`auto-release.yml` 现在的 `ls build/libs/resource-pack-service-*.jar | head -n1` 只取 Paper 那个）。
+- P6：README / `docs/integration.md` 补 Fabric 段（装法、`config/resource-pack-service/config.yml` 路径、JiJ 不需要额外装 Kotlin）。

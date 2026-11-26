@@ -20,8 +20,9 @@ import moe.nekomc.resourcepack.api.BuildResult;
 import moe.nekomc.resourcepack.api.PackSource;
 import moe.nekomc.resourcepack.api.PackStatus;
 import moe.nekomc.resourcepack.api.ResourcePackService;
+import moe.nekomc.resourcepack.command.CommandHost;
 import moe.nekomc.resourcepack.command.RpsCommand;
-import moe.nekomc.resourcepack.command.RpsCommandHost;
+import moe.nekomc.resourcepack.platform.BukkitCommandBridge;
 import moe.nekomc.resourcepack.config.CommunityBundle;
 import moe.nekomc.resourcepack.config.RpsConfig;
 import moe.nekomc.resourcepack.core.EngineConfig;
@@ -60,7 +61,7 @@ import org.bukkit.plugin.java.JavaPlugin;
  * 拿到下发器拼地址，所以下发器必须在 {@code publisher.rebuild(true)} 之前就位。
  * 文件监听放在最后，避免开服瞬间被自己的落盘触发一次。</p>
  */
-public final class ResourcePackServicePlugin extends JavaPlugin implements PackHost, RpsCommandHost {
+public final class ResourcePackServicePlugin extends JavaPlugin implements PackHost, CommandHost {
 
     private volatile RpsConfig config;
     private EngineConfig engineConfig;
@@ -143,9 +144,9 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
         if (command == null) {
             getLogger().warning("plugin.yml 里没有 rps 命令，管理命令不可用");
         } else {
-            RpsCommand executor = new RpsCommand(this);
-            command.setExecutor(executor);
-            command.setTabCompleter(executor);
+            BukkitCommandBridge bridge = new BukkitCommandBridge(new RpsCommand(this));
+            command.setExecutor(bridge);
+            command.setTabCompleter(bridge);
         }
         getServer().getServicesManager().register(ResourcePackService.class, registeredSources, this, ServicePriority.Normal);
         communityListener = new CommunityBindingListener(this);
@@ -575,13 +576,19 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
     }
 
     @Override
-    public Server server() {
-        return getServer();
+    public Path dataFolder() {
+        return getDataFolder().toPath();
     }
 
     @Override
-    public Path dataFolder() {
-        return getDataFolder().toPath();
+    public Path serverRoot() {
+        return getServer().getWorldContainer().toPath().toAbsolutePath().normalize();
+    }
+
+    @Override
+    public Path conflictScanRoot() {
+        Path folder = getDataFolder().toPath().toAbsolutePath();
+        return folder.getParent();
     }
 
     public RpsConfig config() {

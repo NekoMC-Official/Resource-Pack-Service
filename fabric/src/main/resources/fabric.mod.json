@@ -3,9 +3,16 @@
   "id": "resource-pack-service",
   "version": "${version}",
   "name": "Resource Pack Service",
-  "description": "把多个来源的资源包合成一份并由服务端自行下发（Fabric 服务端版）",
+  "description": "把多个资源包合成一个再下发，并跟踪每个玩家的加载状态。",
+  "authors": ["NekoMC"],
+  "license": "MIT",
   "environment": "server",
-  "entrypoints": {},
+  "entrypoints": {
+    "server": ["moe.nekomc.resourcepack.fabric.RpsFabricMod"]
+  },
+  "mixins": [
+    "resource-pack-service.mixins.json"
+  ],
   "depends": {
     "fabricloader": ">=0.20.1",
     "minecraft": "~26.3",

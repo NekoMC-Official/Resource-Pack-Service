@@ -21,7 +21,7 @@ public final class DeliveryStatusStore {
     private final CopyOnWriteArrayList<Entry> recent = new CopyOnWriteArrayList<>();
 
     /** 记录一次状态；同时写入当前状态与历史。 */
-    void record(UUID playerId, String playerName, PackStatus status, String sha1) {
+    public void record(UUID playerId, String playerName, PackStatus status, String sha1) {
         if (playerId == null || status == null) {
             return;
         }
@@ -39,7 +39,7 @@ public final class DeliveryStatusStore {
     }
 
     /** 当前状态；未知玩家返回 {@link PackStatus#UNKNOWN}。 */
-    PackStatus status(UUID playerId) {
+    public PackStatus status(UUID playerId) {
         if (playerId == null) {
             return PackStatus.UNKNOWN;
         }
@@ -48,7 +48,7 @@ public final class DeliveryStatusStore {
     }
 
     /** 加载成功时使用的 SHA-1；其它状态返回 null。 */
-    String hash(UUID playerId) {
+    public String hash(UUID playerId) {
         if (playerId == null) {
             return null;
         }
@@ -60,7 +60,7 @@ public final class DeliveryStatusStore {
     }
 
     /** 最近的状态，新的在前。 */
-    List<Entry> recent(int limit) {
+    public List<Entry> recent(int limit) {
         int capped = Math.max(1, Math.min(limit, MAX_RECENT));
         List<Entry> snapshot = new ArrayList<>(recent);
         snapshot.sort((left, right) -> Long.compare(right.at(), left.at()));
@@ -68,7 +68,7 @@ public final class DeliveryStatusStore {
     }
 
     /** 玩家下线时清理当前状态；历史保留，供 /rps rejected 查看。 */
-    void remove(UUID playerId) {
+    public void remove(UUID playerId) {
         if (playerId != null) {
             current.remove(playerId);
         }

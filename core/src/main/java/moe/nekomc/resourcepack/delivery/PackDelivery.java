@@ -1,5 +1,6 @@
 package moe.nekomc.resourcepack.delivery;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -19,4 +20,19 @@ public interface PackDelivery {
 
     /** 合成成功后回调：记住最新地址与摘要，并同步 HTTP 出口的缓存标记。 */
     void publish(String url, String sha1);
+
+    /** 状态页上的下发方式名称。 */
+    default String name() {
+        return "本插件内置推送";
+    }
+
+    /** 状态页上的一行细节：监听地址与路径，或者自定义地址。 */
+    default String detail() {
+        return "";
+    }
+
+    /** 最近的状态记录，新的在前；平台没有记录能力时返回空表。 */
+    default List<DeliveryStatusStore.Entry> recent(int limit) {
+        return List.of();
+    }
 }
