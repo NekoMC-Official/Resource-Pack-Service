@@ -396,8 +396,8 @@ Minecraft 原版协议没有资源包增量下载：客户端只会对整包发�
 
 本插件不监听其它插件的推送，也不与它们协商。若同目录还有插件直接
 `Player#setResourcePack`，后发者会覆盖前一个包——这是客户端行为，服务端无法仲裁。
-`/rps check` 会扫描 `plugins/*/config.yml` 里疑似 `resource-pack` / `pack-url` /
-`send-on-join` 的配置并给出警告。
+`/rps check` 会扫描 Paper 的 `plugins/*/config.yml` 与 Fabric 的 `config/*.toml`
+里疑似 `resource-pack` / `pack-url` / `send-on-join` 的配置并给出警告。
 
 ## 社区资源包与受控发行
 

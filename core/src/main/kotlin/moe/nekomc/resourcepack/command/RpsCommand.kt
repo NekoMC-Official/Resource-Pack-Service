@@ -215,9 +215,11 @@ class RpsCommand(private val plugin: CommandHost) {
             }
         }
         checkServerProperties(sender)
-        val scanRoot = plugin.conflictScanRoot()
-        if (scanRoot != null) {
-            val findings = PackConflictScanner.scan(scanRoot, plugin.dataFolder().fileName.toString(), 10)
+        val scanRoots = plugin.conflictScanRoots()
+        if (scanRoots.isEmpty()) {
+            sender.sendMessage(PackMessages.info("当前平台没有可扫描的配置目录，跳过第三方资源包检查"))
+        } else {
+            val findings = PackConflictScanner.scanRoots(scanRoots, plugin.dataFolder().fileName.toString(), 10)
             if (findings.isEmpty()) {
                 sender.sendMessage(PackMessages.ok("没有发现别的插件自己配资源包地址"))
             } else {

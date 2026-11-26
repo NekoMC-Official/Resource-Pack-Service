@@ -307,9 +307,8 @@ P0–P3 已落地并在真机跑通，P5（发行/CI）与 P6（对外文档）�
 
 ### 12.5 剩余项
 
-- `/rps conflicts` 在 Fabric 恒返回无扫描根（`conflictScanRoot()` 返回 null）。Paper 版扫 `plugins/`，Fabric 要扫 `mods/` + `config/` 才有同等能力，未实现。
-- `deploy.yml` 的 `fabric` 变体把 jar 投到 `mods/`，而 `DEPLOY_PLUGINS_DIR` 是单一目录 secret；两个变体需要分别配置，或后续拆成两个 secret。
-- 跨平台发布同 Paper：Fabric jar 只在构建平台带对应 `rps-pack`，Windows 产物不能直接用于 Linux 服务端。
+- 跨平台发布同 Paper：Fabric jar 只在构建平台带对应 `rps-pack`，Windows 产物不能直接用于 Linux 服务端。这属于发布约定而不是缺陷——Release 的矩阵本来就按平台各出一份；现在 jar 里还带 `rps-pack/bin/platform.txt`，装错平台时启动日志会直接说"这个 jar 是为 X 构建的"。
+- 尚未在 CI 上跑过 `:fabric`（首次要下 loom 1.19.4 + MC 26.3 + fabric-api），本地构建与真机运行已验。
 
 ### 12.6 已完成收尾（2026-11-27）
 
@@ -320,3 +319,6 @@ P0–P3 已落地并在真机跑通，P5（发行/CI）与 P6（对外文档）�
 - Release：每个平台产出 `resource-pack-service-<ver>-<platform>.jar` 与 `resource-pack-service-fabric-<ver>-<platform>.jar`。
 - Deploy：新增 `variant`（paper / fabric）输入，按变体挑 jar，落地名分别为 `resource-pack-service.jar` / `resource-pack-service-fabric.jar`。
 - 文档：README 安装段拆 Paper / Fabric 两节、构建产物与目录结构按模块重写；`docs/ci.md` 的 CI / Release / Deploy / Auto Release 段同步；`docs/integration.md` 新增「Fabric 服务端」说明（无第三方注册入口）。
+- **第三方资源包扫描补上 Fabric**：`CommandHost.conflictScanRoot()` 换成 `conflictScanRoots(): List<Path>`（Paper 返回 `plugins/`，Fabric 返回 `config/`）；`PackConflictScanner` 新增 `scanRoots`，除原有 `config.yml` 布局外还认 `*.toml` / `*.properties` / 扫描根下散放的 `*.yml`（键允许 `server-resource-pack` 这类前缀），`/rps check` 两端行为一致；单测从 6 个扩到 10 个。
+- **Deploy 目录拆分**：新增 `DEPLOY_MODS_DIR` secret，Fabric 变体投 `mods/`，未配置时回落 `DEPLOY_PLUGINS_DIR`；同时修正 `deploy.yml` 里 `variant` 输入误缩进到 `platform` 下面的问题（此前 `inputs.variant` 实际不存在）。
+- **平台标记**：`paper` / `fabric` 两个构建脚本新增 `writePlatformMarker`，把 `rps-pack/bin/platform.txt` 打进 jar；`BundledRust.ensure` 在解不出当前平台二进制时读它并警告具体是哪个平台的产物。

@@ -35,9 +35,10 @@
 | `DEPLOY_HOST` | 目标主机 |
 | `DEPLOY_USER` | SSH 用户 |
 | `DEPLOY_SSH_KEY` | 私钥（对应公钥已加入目标机 `authorized_keys`） |
-| `DEPLOY_PLUGINS_DIR` | 插件目录，例如 `/srv/nekomc-folia/server/plugins` |
+| `DEPLOY_PLUGINS_DIR` | Paper/Folia 的插件目录，例如 `/srv/nekomc-folia/server/plugins` |
+| `DEPLOY_MODS_DIR` | Fabric 的模组目录，例如 `/srv/nekomc-fabric/server/mods`；不填时回落到 `DEPLOY_PLUGINS_DIR` |
 
-工作流按 `variant` 挑出对应 jar，把现有同名文件备份成 `<名字>.bak-<时间戳>`，再原子替换，并输出远端 `sha256sum`。Paper 变体落地名是 `resource-pack-service.jar`，Fabric 变体是 `resource-pack-service-fabric.jar`（`DEPLOY_PLUGINS_DIR` 此时要指向 `mods/`）。
+工作流按 `variant` 挑出对应 jar，把现有同名文件备份成 `<名字>.bak-<时间戳>`，再原子替换，并输出远端 `sha256sum`。Paper 变体落地名是 `resource-pack-service.jar`，投到 `DEPLOY_PLUGINS_DIR`；Fabric 变体落地名是 `resource-pack-service-fabric.jar`，投到 `DEPLOY_MODS_DIR`（没配则用 `DEPLOY_PLUGINS_DIR`，适合两个目录共用一套部署脚本的旧环境）。
 
 建议在仓库 Settings → Environments 里给 `production` 配置 Required reviewers，避免误触。
 

@@ -586,9 +586,10 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
     }
 
     @Override
-    public Path conflictScanRoot() {
+    public List<Path> conflictScanRoots() {
         Path folder = getDataFolder().toPath().toAbsolutePath();
-        return folder.getParent();
+        Path plugins = folder.getParent();
+        return plugins == null ? List.of() : List.of(plugins);
     }
 
     public RpsConfig config() {

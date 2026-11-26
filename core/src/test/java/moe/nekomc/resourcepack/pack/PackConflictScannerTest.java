@@ -67,4 +67,34 @@ class PackConflictScannerTest {
         write("plugins/B/config.yml", "resource-pack: https://b/1.zip\n");
         assertEquals(2, PackConflictScanner.scan(temp.resolve("plugins"), "ResourcePackService", 2).size());
     }
+
+    @Test
+    void findsTomlInFabricConfigDir() throws IOException {
+        write("config/somemod.toml", "[general]\nresource_pack = \"https://cdn.example.com/some.zip\"\n");
+        List<PackConflictScanner.Finding> findings =
+                PackConflictScanner.scanRoots(List.of(temp.resolve("config")), "resource-pack-service", 10);
+        assertEquals(1, findings.size());
+        assertEquals("somemod", findings.get(0).plugin());
+        assertEquals(2, findings.get(0).line());
+    }
+
+    @Test
+    void findsNestedTomlUnderConfigDir() throws IOException {
+        write("config/othermod/settings.toml", "server-resource-pack = \"https://example.com/x.zip\"\n");
+        assertEquals(1,
+                PackConflictScanner.scanRoots(List.of(temp.resolve("config")), "resource-pack-service", 10).size());
+    }
+
+    @Test
+    void readsLooseYamlAtRoot() throws IOException {
+        write("config/legacy.yml", "pack-url: https://example.com/l.zip\n");
+        assertEquals(1,
+                PackConflictScanner.scanRoots(List.of(temp.resolve("config")), "resource-pack-service", 10).size());
+    }
+
+    @Test
+    void skipsOwnFolderInConfigRoot() throws IOException {
+        write("config/resource-pack-service/config.yml", "resource-pack: https://example.com/self.zip\n");
+        assertTrue(PackConflictScanner.scanRoots(List.of(temp.resolve("config")), "resource-pack-service", 10).isEmpty());
+    }
 }

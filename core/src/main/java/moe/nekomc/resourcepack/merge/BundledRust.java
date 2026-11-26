@@ -40,6 +40,11 @@ public final class BundledRust {
         byte[] payload;
         try (InputStream in = loader.getResourceAsStream(resource)) {
             if (in == null) {
+                String builtFor = builtPlatform(loader);
+                if (builtFor != null) {
+                    logger.warning("jar 内没有当前平台的合并器 " + name + "，这个 jar 是为 " + builtFor
+                            + " 构建的；跨平台请用对应平台的发行包");
+                }
                 return null;
             }
             payload = in.readAllBytes();
@@ -64,6 +69,19 @@ public final class BundledRust {
             return target;
         } catch (IOException error) {
             logger.warning("解出内置合并器失败，本次只用 Java 合并：" + error.getMessage());
+            return null;
+        }
+    }
+
+    /** 构建期写进 jar 的平台标记（`rps-pack/bin/platform.txt`），老 jar 没有时返回 null。 */
+    private static String builtPlatform(ClassLoader loader) {
+        try (InputStream in = loader.getResourceAsStream(RESOURCE_DIR + "platform.txt")) {
+            if (in == null) {
+                return null;
+            }
+            String text = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim();
+            return text.isEmpty() ? null : text;
+        } catch (IOException error) {
             return null;
         }
     }

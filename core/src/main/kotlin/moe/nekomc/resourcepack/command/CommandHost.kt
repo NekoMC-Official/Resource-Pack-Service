@@ -39,9 +39,10 @@ interface CommandHost {
     fun communityRemoteStatus(): String
 
     /**
-     * 扫描"别的插件自己配资源包地址"的目录。
+     * 扫描"别的插件/mod 自己配资源包地址"的根目录。
      *
-     * <p>Paper 侧是 plugins/；Fabric 的 mods 目录里没有同类配置约定，返回 null 表示跳过。</p>
+     * <p>Paper 侧是 plugins/；Fabric 侧是 config/（mod 的 TOML 配置都在这儿）。
+     * 返回空列表表示当前平台没有可扫描的目录，`/rps check` 会跳过这一段。</p>
      */
-    fun conflictScanRoot(): Path?
+    fun conflictScanRoots(): List<Path>
 }

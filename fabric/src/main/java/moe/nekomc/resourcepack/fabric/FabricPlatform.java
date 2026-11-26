@@ -158,9 +158,9 @@ public final class FabricPlatform implements PackHost, CommandHost {
     }
 
     @Override
-    public Path conflictScanRoot() {
-        // Fabric 的 mods 目录没有“别的模组自带资源包地址”的配置约定，跳过冲突扫描。
-        return null;
+    public List<Path> conflictScanRoots() {
+        // mod 的配置都在 config/ 下（TOML 居多），扫描根就是它自己。
+        return List.of(FabricLoader.getInstance().getConfigDir());
     }
 
     @Override

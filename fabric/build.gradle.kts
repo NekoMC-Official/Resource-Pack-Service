@@ -102,11 +102,34 @@ val stageRustBinary by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("dist/bin"))
 }
 
-tasks.processResources {
+
+// 记下这份 jar 是给哪个平台构建的：运行期发现合并器平台不符时能直说差在哪
+val writePlatformMarker by tasks.registering {
+    group = "rust"
+    description = "写 dist/marker/platform.txt，标记构建平台"
     dependsOn(stageRustBinary)
+    val markerDir = layout.buildDirectory.dir("dist/marker")
+    outputs.dir(markerDir)
+    doLast {
+        val binDir = layout.buildDirectory.dir("dist/bin").get().asFile
+        val staged = binDir.listFiles()?.any { it.name.startsWith("rps-pack") } == true
+        if (!staged) {
+            return@doLast
+        }
+        val dir = markerDir.get().asFile
+        dir.mkdirs()
+        File(dir, "platform.txt").writeText(rustPlatformName)
+    }
+}
+
+tasks.processResources {
+    dependsOn(writePlatformMarker)
     from(layout.buildDirectory.dir("dist/bin")) {
         into("rps-pack/bin")
         rename { rustPlatformName }
+    }
+    from(layout.buildDirectory.dir("dist/marker")) {
+        into("rps-pack/bin")
     }
     // 配置模板与 Paper 共用一份，避免两边默认值漂移。
     from(rootProject.layout.projectDirectory.file("paper/src/main/resources/config.yml"))

@@ -103,11 +103,34 @@ val stageRustBinary by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("dist/bin"))
 }
 
-tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+
+// 记下这份 jar 是给哪个平台构建的：运行期发现合并器平台不符时能直说差在哪
+val writePlatformMarker by tasks.registering {
+    group = "rust"
+    description = "写 dist/marker/platform.txt，标记构建平台"
     dependsOn(stageRustBinary)
+    val markerDir = layout.buildDirectory.dir("dist/marker")
+    outputs.dir(markerDir)
+    doLast {
+        val binDir = layout.buildDirectory.dir("dist/bin").get().asFile
+        val staged = binDir.listFiles()?.any { it.name.startsWith("rps-pack") } == true
+        if (!staged) {
+            return@doLast
+        }
+        val dir = markerDir.get().asFile
+        dir.mkdirs()
+        File(dir, "platform.txt").writeText(rustPlatformName)
+    }
+}
+
+tasks.named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+    dependsOn(writePlatformMarker)
     from(layout.buildDirectory.dir("dist/bin")) {
         into("rps-pack/bin")
         rename { rustPlatformName }
+    }
+    from(layout.buildDirectory.dir("dist/marker")) {
+        into("rps-pack/bin")
     }
     archiveBaseName.set("resource-pack-service")
     archiveClassifier.set("")
