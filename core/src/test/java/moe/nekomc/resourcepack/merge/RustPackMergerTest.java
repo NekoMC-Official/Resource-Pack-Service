@@ -111,6 +111,18 @@ class RustPackMergerTest {
     }
 
     @Test
+    void serveSessionIsReusedAcrossMerges(@TempDir Path dir) throws IOException {
+        RustPackMerger merger = merger();
+        List<ZipSource> sources = List.of(new ZipSource(
+                "a", true, zip(dir.resolve("a.zip"), Map.of("assets/x.txt", "x")), "", 0, List.of()));
+        merger.merge(sources, 46, "d", dir.resolve("one.zip"));
+        int afterFirst = RustPackServe.activeSessions();
+        merger.merge(sources, 46, "d", dir.resolve("two.zip"));
+        assertEquals(afterFirst, RustPackServe.activeSessions(), "两次合并应复用同一个常驻会话");
+        assertTrue(afterFirst >= 1, "常驻会话应已启动（旧二进制会回退一次性进程）");
+    }
+
+    @Test
     void missingBinaryIsReportedClearly(@TempDir Path dir) {
         RustPackMerger merger = new RustPackMerger(
                 dir.resolve("nope/rps-pack.exe"), dir, 5_000, "override", true);

@@ -779,3 +779,27 @@ S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11 → S
 - `gradle build`：core 19 套件 / **96 项**、paper 2 套件 / 7 项，0 失败；共 103 项。
 - 短路效果只能在真服观察：`watch` 周期内改一个无关文件不会再来一次外部进程；`/rps build` 在输入未变时返回当前版本而不是重建（需要强制重建时 touch 来源文件即可改变指纹）。
 
+
+## 28. S9：常驻合并会话 `--serve`（2026-11-28）
+
+### 28.1 协议与实现
+
+- **为什么**：微包 14.5 ms 里 13+ ms 是 Windows 进程创建/装载（§25.3），合并逻辑本身 0 ms。常驻会话把这个固定成本摊到一次启动上。
+- **Rust 侧**：`rust/rps-pack/src/main.rs` 新增 `serve` 子命令（`run_serve` / `serve_frame` / `write_frame` / `error_json`）。stdin/stdout 上收发 **u32 小端长度前缀 + JSON** 帧：
+  - 请求：`{"output":"<产物路径>","request":<与一次性模式相同的请求对象>}`
+  - 响应：合并报告（`ok:true`）或 `{"ok":false,"error":"..."}`；单帧出错**不会**退出进程。
+  - `--idle-seconds` 默认 300（最小 1）；空闲超时或 stdin 关闭即退出 0。读线程 `rps-pack-serve-stdin` 阻塞读帧，主线程用 `recv_timeout` 守空闲上限，写出后立即 flush。
+  - 帧上限 16 MiB（`MAX_FRAME_BYTES`），超限直接断开，避免内存被无界帧吃掉。
+- **JVM 侧**：
+  - `core/src/main/java/moe/nekomc/resourcepack/merge/RustPackServeSession.java`：启动 `rps-pack serve --idle-seconds 300`（工作目录 = 插件数据目录，stderr 追加到 `rps-pack-serve.log`），读线程把响应帧放进有界队列，`call(frame, timeoutMs)` 同步收发；超时/断流/协议异常都会标记 broken 并关闭进程。
+  - `core/src/main/kotlin/moe/nekomc/resourcepack/merge/RustPackServe.kt`：按**可执行文件绝对路径**池化会话（`PackPublisher` 每次构建都 new 一个 `RustPackMerger`，会话不能挂在 merger 实例上）；启动失败或任一调用异常就把该 binary 标为 unsupported，**永久回退一次性进程**，并在 JVM 退出时统一关闭。
+  - `RustPackMerger.merge` 先构造 `{"output", "request"}` 帧交给池，拿到报告就直接解析；返回 null（旧二进制没有 serve、进程起不来、超时）时走原一次性路径，超时/stderr/8 MiB 报告上限等既有保护不变。
+- **兼容性**：旧版 rps-pack 不认识 `serve`（退出码 64），首次调用即失败并回退，功能不受影响，只是没有 1 ms 的收益。
+
+### 28.2 验证
+
+- Rust 新增 `rust/rps-pack/tests/serve.rs`：坏帧返回 `ok:false` 后进程仍能服务；同一进程连续两帧各自产出文件且 `entries=2`；关闭 stdin 后退出码 0。`cargo test --offline` **37 项全绿**（lib 4 + merge 24 + mcmeta 2 + writer 6 + serve 1）。
+- JVM 新增 `RustPackMergerTest.serveSessionIsReusedAcrossMerges`：两次合并后 `RustPackServe.activeSessions()` 不增长且 ≥1，证明走的是常驻会话而不是每次新建。带 `RPS_PACK_BIN` 跑该类 **5 项全过、0 跳过**（默认构建里没有 `core/build/dist/bin` 时这组会按既有约定 skip）。
+- 全量 `gradle build` BUILD SUCCESSFUL；core 19 套件 / 97 项 + paper 2 套件 / 7 项 = **104 项**（本地默认 4 项因缺少二进制而 skip，CI 设置 `RPS_PACK_BIN` 后不 skip）。
+- 常驻帧往返（Python 驱动同一进程，1 KB 单条目、20 帧）：**中位 0.945 ms**、均值 0.965、min 0.767、max 1.325 —— 相比一次性的 13.5–14.5 ms 降低一个数量级，达到 §10 的 1–3 ms 目标。
+- 首次合并仍需进程启动与二进制解出（`BundledRust.ensure`），这部分发生在插件启用/首次构建，不影响后续每次重建。

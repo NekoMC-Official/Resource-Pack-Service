@@ -46,12 +46,20 @@ public final class RustPackMerger implements Merger {
             throw new MergeUnavailableException("找不到 rps-pack 可执行文件：" + binary);
         }
         Path output = stagingFile.toAbsolutePath();
+        long started = System.nanoTime();
+        JsonObject served = RustPackServe.call(
+                binary,
+                workDir,
+                serveFrame(sources, formatOverride, description, stagingFile),
+                timeoutMs);
+        if (served != null) {
+            return result(served.toString(), started, output);
+        }
         Path errFile = output.resolveSibling(output.getFileName() + ".stderr");
         ProcessBuilder builder = new ProcessBuilder(
                 binary.toString(), "merge", "--request", "-", "--output", output.toString());
         builder.directory(workDir.toFile());
         builder.redirectError(ProcessBuilder.Redirect.to(errFile.toFile()));
-        long started = System.nanoTime();
         Process process;
         try {
             process = builder.start();
@@ -130,6 +138,13 @@ public final class RustPackMerger implements Merger {
         }
         request.add("sources", array);
         return request;
+    }
+
+    private JsonObject serveFrame(List<ZipSource> sources, int formatOverride, String description, Path stagingFile) {
+        JsonObject frame = new JsonObject();
+        frame.addProperty("output", stagingFile.toAbsolutePath().toString());
+        frame.add("request", request(sources, formatOverride, description));
+        return frame;
     }
 
     private MergeResult result(String stdout, long started, Path output) {
