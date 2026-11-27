@@ -953,3 +953,76 @@ max-concurrent 夹在 1..1024，jitter-ms 夹在 0..10000，retry 夹在 0..3；
 保留：`PackHttpServer` 首建前后的 ETag 仍有两个来源（发布后统一走快照值）；
 `Hashing.sha1Hex(Path)` 因为成为回退路径而不再是死代码；docs 的「4 项跳过」由
 `RustPackMergerTest.binary()` + `Assumptions.assumeTrue` 门控。
+
+## 32. S13：五档复测与 40 万条目档（2026-11-28）
+
+### 32.1 条目上限与基准工具
+
+计划里的「40 万条目」此前被 `scan.rs` 的 `MAX_TOTAL_ENTRIES = 20_000` 挡住，本轮放宽到 `500_000`（README 同步；约 175MB 元数据预算）。新增两个工具：
+
+- `tools/bench/gen_tiers.py`：生成 micro（1 条 1KB）、small（200 条 JSON）、W1（3 源 270MB / 469 条）、many-400k（4 源 × 100,000 条小 JSON，共 400,001 条）与各自的 `request-<tier>.json`。
+- `tools/bench/run_tiers.py`：每档预热 1 次后计时，输出墙钟中位/最小/最大、内部 millis、字节数、条目数、冲突数、直拷数、SHA-1。
+
+### 32.2 写出与内存的三处修正
+
+| 问题 | 现象 | 处理 |
+| --- | --- | --- |
+| 每条目重开 `Vec` 缓冲 | 40 万条目写出阶段分配开销占大头 | writer 复用 `header` / `central` 缓冲；`local_header` 与 `central_record` 改为 append 到复用缓冲。 |
+| 直拷每源一次 `seek(Start)` | 换成 `BufReader` 后 many 档反而 14.2s | `raw_slice` 在 `offset - raw_pos <= RAW_BUFFER` 时用 `seek_relative` 保留 1MB 预读；只有跨大段才重新定位。 |
+| 条目元数据与来源标签重复 | many 档峰值 325MB | ① 按来源 `mem::take` 元数据，名字直接移进胜者表；② `Winner.source` 改 `Arc<str>`；③ 条目超过 5 万时扫描后释放全部中央目录，`read`/`sha1` 按需重开并缓存；④ `write_zip` 按值消费胜者表，BTreeMap 节点随写出逐个释放。 |
+
+### 32.3 五档结果（Ryzen 7 9700X / Windows 11 / release，3 次）
+
+| 档位 | 条目 | 产物 | 墙钟中位 | 内部 millis | 峰值 RSS |
+| --- | --- | --- | --- | --- | --- |
+| micro | 2 | 1,328 B | 15.6 ms | 0 | 启动底噪（CreateProcess ≈13ms） |
+| small | 201 | 36,671 B | 16.1 ms | 2 | 同上 |
+| W1 | 469 | 270,166,333 B | 239.0 ms | 222 | 12 MB |
+| many-400k | 400,001 | 72,720,257 B | 960.4 ms | 942 | **142 MB**（原 325MB） |
+| W2（40 源，旧夹具） | 5,063 | 44,053,665 B | 182.3 ms | 163 | 16 MB |
+
+这一组是旧随机夹具的历史记录：W1 与 W2 的 SHA-1 当时与 S11 基线一致（`c7ec9b44…` / `d7106d16…`）。S13 起 `gen_tiers.py` 改用固定种子（`random.Random(7)`），夹具可逐字节重建，SHA-1 仅在同一份脚本下可比。many 档 400,000 条全部直拷，冲突 0。内存目标 ≤150MB 达成，时间目标 ≤1.5s 达成。W2 保留中央目录是有意取舍：5k 条目下重开成本（约 20ms）高于省下的内存。
+
+### 32.4 测试
+
+`tests/scan.rs` 新增 `reader_reopens_after_release_and_reads_same_bytes`：释放中央目录后 `read` 仍能按需重开并返回同样内容；`release_scan_metadata` 之后再次读取同样成立。Rust 共 43 项（lib 4 + merge 25 + mcmeta 2 + writer 7 + serve 1 + scan 4）。
+
+### 32.5 已知边界
+
+- 单条目仍受 64MB 解压上限约束；400k 档的内存上界按「每条目约 350B（名字 + 胜者 + 映射开销）」估算，条目再翻倍需要改用名称 arena 或分片落盘。
+- 条目超过 5 万且含大量 `lang`/`sounds` 合并时会触发重开，最坏情况每源多一次中央目录解析；当前实测 W2 规模不触发。
+
+## 33. S13 审计修复（2026-11-28）
+
+### 33.1 两个 P1
+
+- **单视图读取**：`read` / `sha1` 不再依赖重新打开的中央目录，而是直接用扫描期记下的 `(offset, compressed, method)` 走 `raw_slice` + `DeflateDecoder`（store 直读）。`ZipArchive` 只在「扫描时无法直拷的压缩方法（bzip2/zstd 等）」这一条回退路径上才按需重开，且重开后校验 `by_index(index).name` 与扫描结果一致，不一致报「扫描后被改动」。这样扫描到写出之间源 zip 被替换也不会出现「哈希读新文件、直拷读旧句柄」的分叉。
+- **大档覆盖**：`tests/merge.rs` 新增 `large_directory_reaches_zip64_and_keeps_every_entry`（70,000 条 stored 条目，条目数超过 65,535 才会真正写出 zip64 EOCD），断言 `report.entries`、zip crate 回读条目数、产物字节含 `PK\x06\x06`、`report.raw_copied == COUNT` 与首尾内容；`tests/scan.rs` 新增 `raw_slice_handles_forward_backward_and_repeated_ranges`，按前跳、回退、同区间重复读、再前跳的顺序逐条比对解压结果，并与 fixture 原文对照。「默认路径不再做 zip 层 CRC 校验，需要时用 `verify_sources`」也记在这里。
+
+### 33.2 P2 处理
+
+| 项 | 处理 |
+| --- | --- |
+| `raw_pos` 乐观更新 | `RawSlice` 在 `Drop` 时用 `len - Take::limit()` 纯算术回写实际消费量，不额外 seek；`raw_slice` 另加 `debug_assert` 对照 `BufReader::stream_position()` |
+| 单条目长度不校验 | `read_capped` / `hash_capped` 增加「声明 N 字节、实际 M 字节」报错；`read_raw` 改传 `Winner.size` |
+| 每条目 `Arc::from(&str)` 分配 | `merge()` 预建每源一个 `Arc<str>`，`from_meta` 只 `Arc::clone` |
+| 每源 1MB 直拷缓冲 | `RAW_BUFFER` 降到 256KB，200 源约 50MB，不再与 150MB 目标冲突 |
+| 每条目一次 `from_utf8_lossy` 分配 | 改为 `std::str::from_utf8` 借用，非法名直接报错（名字本已通过扫描校验） |
+| 每层无条件释放中央目录 | 恢复「每 rank 处理完即释放」，与新的读取路径一致；`MANY_ARCHIVE_THRESHOLD` 与 `Body::Raw.index` 随之删除 |
+| 条目上限护栏 | 并行扫描改为 `AtomicUsize` 全局计数，在分配条目前就 `fetch_add` 判限；上限 500k（约 175MB 元数据预算），独立单测未加，属配置级护栏 |
+
+### 33.3 复测（release，同机）
+
+| 档 | 条目 | 产物 | 墙钟中位 | 内部 | 峰值 RSS |
+| --- | --- | --- | --- | --- | --- |
+| micro | 2 | 1,328 B | 17.2 ms | 1 | 2.4 MB |
+| small | 201 | 36,671 B | 17.3 ms | 1 | 3.9 MB |
+| W1 | 469 | 270,166,333 B | 234.5 ms | 218 | 8.7 MB |
+| W2（40 源） | 12,161 | 86,143,428 B | 116.3 ms | 99 | 24.6 MB |
+| many-400k | 400,001 | 72,720,257 B | 879.2 ms | 862 | **158.1 MB** |
+
+测量方法：`tools/bench/gen_tiers.py` 生成夹具（W2 = 40 源 × (300 JSON + 4 × 512KB)，名称按源区分，因此 40 源累计 12,161 条、无同名冲突）；`tools/bench/run_tiers.py` 每档预热 1 次取 3 次中位，墙钟为 Python `perf_counter`（不含工具自身的 40–50ms `Start-Process` 开销），峰值 RSS 由 `psapi.GetProcessMemoryInfo`（Windows）/`VmHWM`（Linux）每 1ms 轮询取最大值（15ms 级的 micro/small 只有启动底噪，不代表稳态；取不到时输出 `null`）。many 档 400,000 条全部直拷、冲突 0；峰值比 §32.3 的 142MB 高，原因是读取路径改为按需解压后，写出阶段同时持有胜者表与 writer 的中央目录条目，仍在 200MB 预算内。夹具由 `gen_tiers.py` 用固定种子重建（条目时间戳固定为 2024-01-01），连续两次生成的 zip SHA-256 相同；旧 §32.3 的随机夹具数值只作历史对照。
+
+### 33.4 验证
+
+Rust 48 项全绿（lib 5 + merge 26 + mcmeta 2 + writer 7 + serve 1 + scan 7），无编译警告；`.tmp/build-all.ps1` EXIT=0，core 21 套件 / 107 项（4 项需 `RPS_PACK_BIN` 跳过）+ paper 2 / 7；jar 体积 Paper 2,600,335 B、Fabric 2,747,832 B，均低于守卫上限。

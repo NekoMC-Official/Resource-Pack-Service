@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::error::{err, Result};
+use crate::error::{Result, err};
 
 /// 取一个来源声明的 supported_formats / pack_format，归一化成闭区间。
 pub fn interval(mcmeta: &Value, source_id: &str) -> Result<(i64, i64)> {

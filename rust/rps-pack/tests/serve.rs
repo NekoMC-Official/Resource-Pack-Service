@@ -17,9 +17,10 @@ fn work(name: &str) -> PathBuf {
 fn write_source(path: &Path, entries: &[(&str, &[u8])]) {
     let file = std::fs::File::create(path).expect("创建 fixture zip");
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    zip.start_file("pack.mcmeta", options).expect("写 pack.mcmeta");
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("pack.mcmeta", options)
+        .expect("写 pack.mcmeta");
     let mcmeta = serde_json::to_vec(&serde_json::json!({
         "pack": { "pack_format": 46, "description": "serve fixture" }
     }))
@@ -59,7 +60,10 @@ fn read_frame(stdout: &mut ChildStdout) -> serde_json::Value {
     let mut header = [0u8; 4];
     stdout.read_exact(&mut header).expect("读响应长度");
     let length = u32::from_le_bytes(header) as usize;
-    assert!(length > 0 && length < 16 * 1024 * 1024, "响应长度异常: {length}");
+    assert!(
+        length > 0 && length < 16 * 1024 * 1024,
+        "响应长度异常: {length}"
+    );
     let mut payload = vec![0u8; length];
     stdout.read_exact(&mut payload).expect("读响应内容");
     serde_json::from_slice(&payload).expect("响应是 JSON")
@@ -102,7 +106,10 @@ fn serve_handles_multiple_frames_and_errors_without_exiting() {
             Some(true),
             "第 {index} 帧失败: {report}"
         );
-        assert_eq!(report.get("entries").and_then(|value| value.as_u64()), Some(2));
+        assert_eq!(
+            report.get("entries").and_then(|value| value.as_u64()),
+            Some(2)
+        );
         assert!(output.is_file(), "第 {index} 帧没有产出文件");
     }
 

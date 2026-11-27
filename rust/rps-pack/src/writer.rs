@@ -14,8 +14,8 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 
-use flate2::write::DeflateEncoder;
 use flate2::Compression;
+use flate2::write::DeflateEncoder;
 use sha1::{Digest, Sha1};
 
 use crate::error::{MergeError, Result};
@@ -71,6 +71,8 @@ pub struct ZipArchiveWriter {
     pos: u64,
     level: u32,
     scratch: Vec<u8>,
+    header: Vec<u8>,
+    central: Vec<u8>,
     recompressed: usize,
     stored: usize,
     raw_copied: usize,
@@ -96,6 +98,8 @@ impl ZipArchiveWriter {
             pos: 0,
             level,
             scratch: vec![0u8; COPY_BUFFER],
+            header: Vec::with_capacity(256),
+            central: Vec::with_capacity(1 << 20),
             recompressed: 0,
             stored: 0,
             raw_copied: 0,
@@ -105,7 +109,13 @@ impl ZipArchiveWriter {
     /// 以 deflate 写入一个条目（固定走压缩，不判断收益）。
     pub fn add_deflated(&mut self, name: &str, data: &[u8]) -> Result<()> {
         let compressed = deflate(data, self.level, name)?;
-        self.write_owned(name, crc32fast::hash(data), 8, data.len() as u64, &compressed)?;
+        self.write_owned(
+            name,
+            crc32fast::hash(data),
+            8,
+            data.len() as u64,
+            &compressed,
+        )?;
         self.recompressed += 1;
         Ok(())
     }
@@ -127,7 +137,13 @@ impl ZipArchiveWriter {
             self.add_stored(name, data)?;
             return Ok(false);
         }
-        self.write_owned(name, crc32fast::hash(data), 8, data.len() as u64, &compressed)?;
+        self.write_owned(
+            name,
+            crc32fast::hash(data),
+            8,
+            data.len() as u64,
+            &compressed,
+        )?;
         self.recompressed += 1;
         Ok(true)
     }
@@ -144,7 +160,6 @@ impl ZipArchiveWriter {
     ) -> Result<()> {
         let name_bytes = name.as_bytes();
         validate_name(name_bytes, name)?;
-        self.raw_copied += 1;
         if !matches!(method, 0 | 8) {
             return Err(MergeError::new(format!(
                 "条目 {name} 的压缩方法 {method} 不支持直接拷贝"
@@ -157,28 +172,40 @@ impl ZipArchiveWriter {
         }
         let flags = utf8_flag(name_bytes);
         let offset = self.pos;
-        let header = local_header(name_bytes, crc, compressed, uncompressed, method, flags, VERSION_DEFAULT);
-        self.emit(&header)?;
+        self.header.clear();
+        local_header(
+            &mut self.header,
+            name_bytes,
+            crc,
+            compressed,
+            uncompressed,
+            method,
+            flags,
+            VERSION_DEFAULT,
+        );
+        emit(&mut self.inner, &mut self.hasher, &self.header)
+            .map_err(|error| MergeError::new(format!("写入条目 {name} 失败: {error}")))?;
+        self.pos += self.header.len() as u64;
 
         let data_start = self.pos;
         let mut remaining = compressed;
         while remaining > 0 {
             let want = remaining.min(COPY_BUFFER as u64) as usize;
-            let read = data.read(&mut self.scratch[..want]).map_err(|error| {
-                MergeError::new(format!("读取条目 {name} 的数据失败: {error}"))
-            })?;
+            let read = data
+                .read(&mut self.scratch[..want])
+                .map_err(|error| MergeError::new(format!("读取条目 {name} 的数据失败: {error}")))?;
             if read == 0 {
                 return Err(MergeError::new(format!(
                     "条目 {name} 压缩数据不完整：还差 {remaining} 字节"
                 )));
             }
-            emit(&mut self.inner, &mut self.hasher, &self.scratch[..read]).map_err(|error| {
-                MergeError::new(format!("拷贝条目 {name} 失败: {error}"))
-            })?;
+            emit(&mut self.inner, &mut self.hasher, &self.scratch[..read])
+                .map_err(|error| MergeError::new(format!("拷贝条目 {name} 失败: {error}")))?;
             self.pos += read as u64;
             remaining -= read as u64;
         }
         self.pos = data_start + compressed;
+        self.raw_copied += 1;
         self.entries.push(Entry {
             name: name_bytes.to_vec(),
             crc,
@@ -196,15 +223,24 @@ impl ZipArchiveWriter {
     pub fn finish(mut self) -> Result<WriteStats> {
         let central_start = self.pos;
         for index in 0..self.entries.len() {
-            let record = {
-                let entry = &self.entries[index];
-                central_record(entry)
-            };
-            self.emit(&record)?;
+            if self.central.len() >= (1 << 20) {
+                let buffered = std::mem::take(&mut self.central);
+                self.emit(&buffered)?;
+                self.central = buffered;
+                self.central.clear();
+            }
+            central_record(&mut self.central, &self.entries[index]);
+        }
+        if !self.central.is_empty() {
+            let buffered = std::mem::take(&mut self.central);
+            self.emit(&buffered)?;
+            self.central = buffered;
+            self.central.clear();
         }
         let central_size = self.pos - central_start;
         let count = self.entries.len() as u64;
-        let needs64 = count >= u16::MAX as u64 || central_size >= U32_MAX || central_start >= U32_MAX;
+        let needs64 =
+            count >= u16::MAX as u64 || central_size >= U32_MAX || central_start >= U32_MAX;
 
         if needs64 {
             let eocd64_offset = self.pos;
@@ -276,12 +312,23 @@ impl ZipArchiveWriter {
         }
         let flags = utf8_flag(name_bytes);
         let offset = self.pos;
-        let header = local_header(name_bytes, crc, compressed, uncompressed, method, flags, VERSION_DEFAULT);
-        self.emit(&header)?;
+        self.header.clear();
+        local_header(
+            &mut self.header,
+            name_bytes,
+            crc,
+            compressed,
+            uncompressed,
+            method,
+            flags,
+            VERSION_DEFAULT,
+        );
+        emit(&mut self.inner, &mut self.hasher, &self.header)
+            .map_err(|error| MergeError::new(format!("写入条目 {name} 失败: {error}")))?;
+        self.pos += self.header.len() as u64;
         if !payload.is_empty() {
-            emit(&mut self.inner, &mut self.hasher, payload).map_err(|error| {
-                MergeError::new(format!("写入条目 {name} 失败: {error}"))
-            })?;
+            emit(&mut self.inner, &mut self.hasher, payload)
+                .map_err(|error| MergeError::new(format!("写入条目 {name} 失败: {error}")))?;
         }
         self.pos += compressed;
         self.entries.push(Entry {
@@ -321,11 +368,7 @@ fn validate_name(name: &[u8], display: &str) -> Result<()> {
 }
 
 fn utf8_flag(name: &[u8]) -> u16 {
-    if name.is_ascii() {
-        0
-    } else {
-        0x0800
-    }
+    if name.is_ascii() { 0 } else { 0x0800 }
 }
 
 fn deflate(data: &[u8], level: u32, name: &str) -> Result<Vec<u8>> {
@@ -347,6 +390,7 @@ fn emit<W: Write>(inner: &mut W, hasher: &mut Sha1, data: &[u8]) -> io::Result<(
 }
 
 fn local_header(
+    buffer: &mut Vec<u8>,
     name: &[u8],
     crc: u32,
     compressed: u64,
@@ -354,7 +398,7 @@ fn local_header(
     method: u16,
     flags: u16,
     version: u16,
-) -> Vec<u8> {
+) {
     let placeholder32 = |value: u64| {
         if value >= U32_MAX {
             u32::MAX
@@ -362,23 +406,22 @@ fn local_header(
             value as u32
         }
     };
-    let mut buffer = Vec::with_capacity(30 + name.len());
-    push_u32(&mut buffer, LOCAL_SIG);
-    push_u16(&mut buffer, version);
-    push_u16(&mut buffer, flags);
-    push_u16(&mut buffer, method);
-    push_u16(&mut buffer, DOS_TIME);
-    push_u16(&mut buffer, DOS_DATE);
-    push_u32(&mut buffer, crc);
-    push_u32(&mut buffer, placeholder32(compressed));
-    push_u32(&mut buffer, placeholder32(uncompressed));
-    push_u16(&mut buffer, name.len() as u16);
-    push_u16(&mut buffer, 0);
+    buffer.clear();
+    push_u32(buffer, LOCAL_SIG);
+    push_u16(buffer, version);
+    push_u16(buffer, flags);
+    push_u16(buffer, method);
+    push_u16(buffer, DOS_TIME);
+    push_u16(buffer, DOS_DATE);
+    push_u32(buffer, crc);
+    push_u32(buffer, placeholder32(compressed));
+    push_u32(buffer, placeholder32(uncompressed));
+    push_u16(buffer, name.len() as u16);
+    push_u16(buffer, 0);
     buffer.extend_from_slice(name);
-    buffer
 }
 
-fn central_record(entry: &Entry) -> Vec<u8> {
+fn central_record(buffer: &mut Vec<u8>, entry: &Entry) {
     let mut extra = Vec::new();
     let mut uncompressed32 = u32::MAX;
     let mut compressed32 = u32::MAX;
@@ -409,28 +452,26 @@ fn central_record(entry: &Entry) -> Vec<u8> {
     } else {
         entry.version
     };
-    let mut buffer = Vec::with_capacity(46 + entry.name.len() + extra_field.len());
-    push_u32(&mut buffer, CENTRAL_SIG);
+    push_u32(buffer, CENTRAL_SIG);
     // 高字节 3 表示 Unix，权限位在 external attributes 里。
-    push_u16(&mut buffer, 0x0300 | version);
-    push_u16(&mut buffer, version);
-    push_u16(&mut buffer, entry.flags);
-    push_u16(&mut buffer, entry.method);
-    push_u16(&mut buffer, DOS_TIME);
-    push_u16(&mut buffer, DOS_DATE);
-    push_u32(&mut buffer, entry.crc);
-    push_u32(&mut buffer, compressed32);
-    push_u32(&mut buffer, uncompressed32);
-    push_u16(&mut buffer, entry.name.len() as u16);
-    push_u16(&mut buffer, extra_field.len() as u16);
-    push_u16(&mut buffer, 0);
-    push_u16(&mut buffer, 0);
-    push_u16(&mut buffer, 0);
-    push_u32(&mut buffer, 0o100644 << 16);
-    push_u32(&mut buffer, offset32);
+    push_u16(buffer, 0x0300 | version);
+    push_u16(buffer, version);
+    push_u16(buffer, entry.flags);
+    push_u16(buffer, entry.method);
+    push_u16(buffer, DOS_TIME);
+    push_u16(buffer, DOS_DATE);
+    push_u32(buffer, entry.crc);
+    push_u32(buffer, compressed32);
+    push_u32(buffer, uncompressed32);
+    push_u16(buffer, entry.name.len() as u16);
+    push_u16(buffer, extra_field.len() as u16);
+    push_u16(buffer, 0);
+    push_u16(buffer, 0);
+    push_u16(buffer, 0);
+    push_u32(buffer, 0o100644 << 16);
+    push_u32(buffer, offset32);
     buffer.extend_from_slice(&entry.name);
     buffer.extend_from_slice(&extra_field);
-    buffer
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -145,10 +145,9 @@ impl AssetKind {
             | AssetKind::Model
             | AssetKind::BlockState
             | AssetKind::ItemModel => Severity::High,
-            AssetKind::Lang
-            | AssetKind::Sound
-            | AssetKind::Font
-            | AssetKind::Atlas => Severity::Medium,
+            AssetKind::Lang | AssetKind::Sound | AssetKind::Font | AssetKind::Atlas => {
+                Severity::Medium
+            }
             AssetKind::Shader | AssetKind::Metadata | AssetKind::Other => Severity::Low,
         }
     }

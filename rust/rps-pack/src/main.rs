@@ -4,9 +4,9 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::Duration;
-use std::path::PathBuf;
 
 use rps_pack::model::Request;
 
@@ -160,9 +160,8 @@ fn serve_frame(frame: &[u8]) -> Vec<u8> {
     };
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match rps_pack::merge(&request, &project_root, &output) {
-        Ok(report) => serde_json::to_vec(&report).unwrap_or_else(|error| {
-            error_json(format!("报告序列化失败: {error}"))
-        }),
+        Ok(report) => serde_json::to_vec(&report)
+            .unwrap_or_else(|error| error_json(format!("报告序列化失败: {error}"))),
         Err(error) => error_json(error.to_string()),
     }
 }

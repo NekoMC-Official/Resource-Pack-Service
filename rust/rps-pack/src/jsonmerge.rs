@@ -171,7 +171,11 @@ fn push_field(out: &mut Vec<String>, path: &str, low: &Value, high: &Value) {
     let pointer = if path.is_empty() { "/" } else { path };
     let mut field = format!("{pointer}: {} -> {}", short(low), short(high));
     if field.chars().count() > MAX_FIELD_CHARS {
-        field = field.chars().take(MAX_FIELD_CHARS.saturating_sub(1)).collect::<String>() + "…";
+        field = field
+            .chars()
+            .take(MAX_FIELD_CHARS.saturating_sub(1))
+            .collect::<String>()
+            + "…";
     }
     out.push(field);
 }

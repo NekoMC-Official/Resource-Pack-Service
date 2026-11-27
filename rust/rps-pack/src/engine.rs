@@ -5,19 +5,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
-use crate::error::{err, MergeError, Result};
+use crate::error::{MergeError, Result, err};
 use crate::jsonmerge;
 use crate::mcmeta;
 use crate::model::{
     AssetKind, Conflict, ConflictMode, ConflictSource, ConflictSummary, Policy, Report, Request,
     Severity,
 };
-use crate::scan::{hex, EntryMeta, SourceReader, MAX_ENTRY_BYTES};
+use crate::scan::{EntryMeta, MAX_ENTRY_BYTES, SourceReader, hex};
 use crate::writer::{WriteStats, ZipArchiveWriter};
 
 pub const PACK_MC_META: &str = "pack.mcmeta";
@@ -29,12 +30,10 @@ const DEFLATE_LEVEL: u32 = 6;
 const MAX_CONFLICT_DETAILS: usize = 5000;
 /// 单条冲突最多保留的字段差异；与 jsonmerge 的上限一致。
 const MAX_CONFLICT_FIELDS: usize = 50;
-
 /// 胜者条目的内容来源：直拷原始压缩字节，或内存里已合并出的字节。
 enum Body {
     Raw {
         source: usize,
-        index: usize,
         offset: u64,
         compressed: u64,
     },
@@ -50,7 +49,8 @@ struct Winner {
     body: Body,
     /// 层序：0 是最先叠的低层。
     layer: usize,
-    source: String,
+    /// 来源标签在内存里共享一份，40 万条目时不重复分配。
+    source: Arc<str>,
     priority: i64,
 }
 
@@ -59,17 +59,17 @@ impl Winner {
         meta: &EntryMeta,
         rank: usize,
         source: &crate::model::Source,
+        label: &Arc<str>,
         readers: &mut [SourceReader],
     ) -> Result<Self> {
         let body = match meta.raw_method {
             Some(_method) => Body::Raw {
                 source: rank,
-                index: meta.index,
                 offset: meta.offset,
                 compressed: meta.compressed,
             },
             // 无法直拷的压缩方法（bzip2/zstd…）：现在解压，写出时重压。
-            None => Body::Owned(readers[rank].read(meta.index)?),
+            None => Body::Owned(readers[rank].read(&meta)?),
         };
         Ok(Winner {
             crc: meta.crc,
@@ -78,17 +78,12 @@ impl Winner {
             sha1: None,
             body,
             layer: rank,
-            source: source.id.clone(),
+            source: Arc::clone(label),
             priority: source.priority,
         })
     }
 
-    fn owned(
-        bytes: Vec<u8>,
-        layer: usize,
-        source: &str,
-        priority: i64,
-    ) -> Self {
+    fn owned(bytes: Vec<u8>, layer: usize, source: &str, priority: i64) -> Self {
         Winner {
             crc: crc32fast::hash(&bytes),
             size: bytes.len() as u64,
@@ -96,7 +91,7 @@ impl Winner {
             sha1: None,
             body: Body::Owned(bytes),
             layer,
-            source: source.to_string(),
+            source: Arc::from(source),
             priority,
         }
     }
@@ -109,23 +104,39 @@ fn sha1_bytes(bytes: &[u8]) -> String {
 }
 
 /// 只在需要判定时计算内容 SHA-1，并缓存。
-fn ensure_sha1(winner: &mut Winner, readers: &mut [SourceReader]) -> Result<String> {
+fn ensure_sha1(winner: &mut Winner, readers: &mut [SourceReader], name: &str) -> Result<String> {
     if let Some(sha1) = &winner.sha1 {
         return Ok(sha1.clone());
     }
     let sha1 = match &winner.body {
         Body::Owned(bytes) => sha1_bytes(bytes),
-        Body::Raw { source, index, .. } => readers[*source].sha1(*index)?,
+        Body::Raw {
+            source,
+            offset,
+            compressed,
+            ..
+        } => readers[*source].sha1(name, *offset, *compressed, winner.method, winner.size)?,
     };
     winner.sha1 = Some(sha1.clone());
     Ok(sha1)
 }
 
 /// 取条目内容（JSON 合并与冲突判定用）；调用方负责上限。
-fn body_bytes(winner: &Winner, readers: &mut [SourceReader]) -> Result<Vec<u8>> {
+fn body_bytes(winner: &Winner, readers: &mut [SourceReader], name: &str) -> Result<Vec<u8>> {
     match &winner.body {
         Body::Owned(bytes) => Ok(bytes.clone()),
-        Body::Raw { source, index, .. } => readers[*source].read(*index),
+        Body::Raw {
+            source,
+            offset,
+            compressed,
+            ..
+        } => Ok(readers[*source].read_raw(
+            name,
+            *offset,
+            *compressed,
+            winner.method,
+            winner.size,
+        )?),
     }
 }
 
@@ -179,11 +190,15 @@ impl ConflictState {
     }
 }
 
-fn side_of(winner: &mut Winner, readers: &mut [SourceReader]) -> Result<ConflictSource> {
+fn side_of(
+    winner: &mut Winner,
+    readers: &mut [SourceReader],
+    name: &str,
+) -> Result<ConflictSource> {
     Ok(ConflictSource {
-        id: winner.source.clone(),
+        id: winner.source.to_string(),
         priority: winner.priority,
-        sha1: ensure_sha1(winner, readers)?,
+        sha1: ensure_sha1(winner, readers, name)?,
         bytes: winner.size,
     })
 }
@@ -213,6 +228,11 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         .collect();
     let scan_started = Instant::now();
     let mut readers = crate::scan::open_sources(&specs, crate::scan::scan_threads(specs.len()))?;
+    // 来源标签预建一次，40 万条目共享同一份字符串。
+    let labels: Vec<Arc<str>> = readers
+        .iter()
+        .map(|reader| Arc::from(reader.id.as_str()))
+        .collect();
     let scan_ms = scan_started.elapsed().as_millis();
 
     let mut ranges: Vec<(String, i64, i64)> = Vec::new();
@@ -227,7 +247,9 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         Some((_, low, high)) => (*low, *high),
         None => {
             if request.format <= 0 {
-                return err("所有来源都没有 pack.mcmeta，且请求里 format 为 0：无法确定 pack_format，请在请求里显式指定 format");
+                return err(
+                    "所有来源都没有 pack.mcmeta，且请求里 format 为 0：无法确定 pack_format，请在请求里显式指定 format",
+                );
             }
             (request.format, request.format)
         }
@@ -281,9 +303,9 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
 
     for rank in 0..readers.len() {
         let source_index = order[rank];
-        let count = readers[rank].entries.len();
-        for position in 0..count {
-            let meta = readers[rank].entries[position].clone();
+        // 按来源逐个取走元数据：名字直接移进胜者表，不再逐条克隆一份字符串。
+        let mut metas = std::mem::take(&mut readers[rank].entries);
+        for meta in metas.drain(..) {
             if meta.name == PACK_MC_META {
                 continue;
             }
@@ -293,14 +315,17 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
                 request,
                 rank,
                 source_index,
-                &meta,
+                meta,
                 &mut readers,
+                &labels,
                 &mut warnings,
             )?;
             if duplicate {
                 deduped += 1;
             }
         }
+        // 中央目录只在读取不支持直拷的条目时才需要；这一层处理完就放手。
+        readers[rank].release_archive();
     }
 
     entries.insert(
@@ -308,12 +333,19 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         Winner::owned(built_bytes, usize::MAX, "rps-pack", i64::MAX),
     );
     warnings.extend(namespace_warnings(&entries));
+    for reader in &mut readers {
+        reader.release_scan_metadata();
+    }
 
     let raw_bytes: u64 = entries.values().map(|winner| winner.size).sum();
     if std::env::var_os("RPS_TRACE").is_some() {
-        eprintln!("[rps-pack] scan={scan_ms}ms total={}ms", started.elapsed().as_millis());
+        eprintln!(
+            "[rps-pack] scan={scan_ms}ms total={}ms",
+            started.elapsed().as_millis()
+        );
     }
-    let stats = write_zip(&mut entries, &mut readers, output, request.verify_sources)?;
+    let entry_count = entries.len();
+    let stats = write_zip(entries, &mut readers, output, request.verify_sources)?;
     let bytes = stats.bytes;
     let sha1_hex = stats.sha1.clone();
     let ratio = if raw_bytes == 0 {
@@ -341,7 +373,7 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
         ok: true,
         sha1: sha1_hex,
         bytes,
-        entries: entries.len(),
+        entries: entry_count,
         deduped,
         format,
         format_min,
@@ -414,8 +446,8 @@ fn note_conflict(
     fields: Vec<String>,
     readers: &mut [SourceReader],
 ) -> Result<()> {
-    let winner_side = side_of(winner, readers)?;
-    let loser_side = side_of(loser, readers)?;
+    let winner_side = side_of(winner, readers, name)?;
+    let loser_side = side_of(loser, readers, name)?;
     if let Some(state) = conflicts.get_mut(name) {
         if state.winner.id != winner_side.id {
             let previous = std::mem::replace(&mut state.winner, winner_side);
@@ -455,13 +487,14 @@ fn insert(
     request: &Request,
     rank: usize,
     source_index: usize,
-    meta: &EntryMeta,
+    meta: EntryMeta,
     readers: &mut [SourceReader],
+    labels: &[Arc<str>],
     warnings: &mut Vec<String>,
 ) -> Result<bool> {
-    let name = meta.name.clone();
     let source = &request.sources[source_index];
-    let mut incoming = Winner::from_meta(meta, rank, source, readers)?;
+    let mut incoming = Winner::from_meta(&meta, rank, source, &labels[rank], readers)?;
+    let name = meta.name;
     let previous = match entries.remove(&name) {
         Some(previous) => previous,
         None => {
@@ -473,7 +506,9 @@ fn insert(
 
     // 大小与 CRC 只做快速预筛；真正判重要求 SHA-1 也一致。
     if previous.size == incoming.size && previous.crc == incoming.crc {
-        if ensure_sha1(&mut previous, readers)? == ensure_sha1(&mut incoming, readers)? {
+        if ensure_sha1(&mut previous, readers, &name)?
+            == ensure_sha1(&mut incoming, readers, &name)?
+        {
             entries.insert(name, previous);
             return Ok(true);
         }
@@ -493,8 +528,8 @@ fn insert(
 
     if request.json_merge {
         if let Some(merge_kind) = jsonmerge::kind_of(&name) {
-            let low_bytes = body_bytes(&previous, readers)?;
-            let high_bytes = body_bytes(&incoming, readers)?;
+            let low_bytes = body_bytes(&previous, readers, &name)?;
+            let high_bytes = body_bytes(&incoming, readers, &name)?;
             let low = serde_json::from_slice::<Value>(&low_bytes);
             let high = serde_json::from_slice::<Value>(&high_bytes);
             match (low, high) {
@@ -585,7 +620,7 @@ fn namespace_warnings(entries: &BTreeMap<String, Winner>) -> Vec<String> {
             owners
                 .entry(namespace.to_string())
                 .or_default()
-                .insert(winner.source.clone());
+                .insert(winner.source.to_string());
         }
     }
     owners
@@ -609,16 +644,20 @@ fn resolve(project_root: &Path, raw: &str) -> PathBuf {
 }
 
 fn write_zip(
-    entries: &mut BTreeMap<String, Winner>,
+    entries: BTreeMap<String, Winner>,
     readers: &mut [SourceReader],
     output: &Path,
     verify_sources: bool,
 ) -> Result<WriteStats> {
     let mut writer = ZipArchiveWriter::create(output, DEFLATE_LEVEL)?;
-    for (name, winner) in entries.iter() {
+    // 逐个取走：名字直接搬进 writer，BTreeMap 的节点与键随迭代释放。
+    for (name, winner) in entries {
+        let name = name.into_bytes();
+        let display = std::str::from_utf8(&name)
+            .map_err(|error| MergeError::new(format!("条目名不是合法 UTF-8: {error}")))?;
         match &winner.body {
             Body::Owned(bytes) => {
-                writer.add_auto(name, bytes)?;
+                writer.add_auto(&display, bytes)?;
             }
             Body::Raw {
                 source,
@@ -629,7 +668,7 @@ fn write_zip(
                 if verify_sources {
                     verify_raw(
                         &mut readers[*source],
-                        name,
+                        &display,
                         *offset,
                         *compressed,
                         winner.method,
@@ -639,7 +678,7 @@ fn write_zip(
                 }
                 let mut slice = readers[*source].raw_slice(*offset, *compressed)?;
                 writer.add_raw(
-                    name,
+                    &display,
                     winner.crc,
                     *compressed,
                     winner.size,
@@ -670,8 +709,9 @@ fn verify_raw(
         0 => {
             let mut source = std::io::BufReader::with_capacity(64 * 1024, slice);
             loop {
-                let read = std::io::Read::read(&mut source, &mut buffer)
-                    .map_err(|error| MergeError::new(format!("条目 {name} 校验读取失败: {error}")))?;
+                let read = std::io::Read::read(&mut source, &mut buffer).map_err(|error| {
+                    MergeError::new(format!("条目 {name} 校验读取失败: {error}"))
+                })?;
                 if read == 0 {
                     break;
                 }
@@ -687,8 +727,9 @@ fn verify_raw(
         8 => {
             let mut decoder = flate2::read::DeflateDecoder::new(slice);
             loop {
-                let read = std::io::Read::read(&mut decoder, &mut buffer)
-                    .map_err(|error| MergeError::new(format!("条目 {name} 校验解压失败: {error}")))?;
+                let read = std::io::Read::read(&mut decoder, &mut buffer).map_err(|error| {
+                    MergeError::new(format!("条目 {name} 校验解压失败: {error}"))
+                })?;
                 if read == 0 {
                     break;
                 }

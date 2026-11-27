@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use rps_pack::{merge, AssetKind, ConflictMode, Policy, Request, Severity, Source};
+use rps_pack::{AssetKind, ConflictMode, Policy, Request, Severity, Source, merge};
 use sha1::{Digest, Sha1};
 
 fn work(name: &str) -> PathBuf {
@@ -30,8 +30,8 @@ fn mcmeta_bytes(pack_format: i64, supported: Option<serde_json::Value>) -> Vec<u
 fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
     let file = std::fs::File::create(path).expect("创建 fixture zip");
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     for (name, bytes) in entries {
         zip.start_file(*name, options).expect("写条目");
         zip.write_all(bytes).expect("写条目内容");
@@ -47,9 +47,10 @@ fn write_source(
 ) {
     let file = std::fs::File::create(path).expect("创建 fixture zip");
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    zip.start_file("pack.mcmeta", options).expect("写 pack.mcmeta");
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("pack.mcmeta", options)
+        .expect("写 pack.mcmeta");
     zip.write_all(&mcmeta_bytes(pack_format, supported))
         .expect("写 pack.mcmeta 内容");
     for (name, bytes) in entries {
@@ -110,7 +111,11 @@ fn entry<'a>(entries: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
         .map(|(_, bytes)| bytes.as_slice())
 }
 
-fn merge_ok(request: &Request, dir: &Path, out: &Path) -> (rps_pack::Report, Vec<(String, Vec<u8>)>) {
+fn merge_ok(
+    request: &Request,
+    dir: &Path,
+    out: &Path,
+) -> (rps_pack::Report, Vec<(String, Vec<u8>)>) {
     let report = merge(request, dir, out).expect("合并应当成功");
     let entries = read_zip(out);
     (report, entries)
@@ -235,7 +240,10 @@ fn lang_json_is_deep_merged() {
         &low,
         46,
         None,
-        &[(path, br#"{"a":"1","b":"low","nested":{"x":1,"keep":true}}"#.as_slice())],
+        &[(
+            path,
+            br#"{"a":"1","b":"low","nested":{"x":1,"keep":true}}"#.as_slice(),
+        )],
     );
     write_source(
         &high,
@@ -285,13 +293,19 @@ fn font_arrays_are_concatenated_high_first() {
         &low,
         46,
         None,
-        &[(path, br#"{"providers":[{"type":"a"},{"type":"shared"}]}"#.as_slice())],
+        &[(
+            path,
+            br#"{"providers":[{"type":"a"},{"type":"shared"}]}"#.as_slice(),
+        )],
     );
     write_source(
         &high,
         46,
         None,
-        &[(path, br#"{"providers":[{"type":"shared"},{"type":"b"}]}"#.as_slice())],
+        &[(
+            path,
+            br#"{"providers":[{"type":"shared"},{"type":"b"}]}"#.as_slice(),
+        )],
     );
     let out = dir.join("out.zip");
 
@@ -340,14 +354,25 @@ fn zip_slip_entries_are_rejected() {
     let dir = work("zip-slip");
     let traversal = dir.join("traversal.zip");
     write_source(&traversal, 46, None, &[("../evil.txt", b"boom".as_slice())]);
-    let error = merge(&request(vec![source("evil", &traversal, 0)]), &dir, &dir.join("a.zip"))
-        .expect_err("包含 .. 的条目必须拒绝");
-    assert!(error.to_string().contains(".."), "错误应指出 zip slip: {error}");
+    let error = merge(
+        &request(vec![source("evil", &traversal, 0)]),
+        &dir,
+        &dir.join("a.zip"),
+    )
+    .expect_err("包含 .. 的条目必须拒绝");
+    assert!(
+        error.to_string().contains(".."),
+        "错误应指出 zip slip: {error}"
+    );
 
     let absolute = dir.join("absolute.zip");
     write_source(&absolute, 46, None, &[("/etc/passwd", b"boom".as_slice())]);
-    let error = merge(&request(vec![source("evil", &absolute, 0)]), &dir, &dir.join("b.zip"))
-        .expect_err("绝对路径条目必须拒绝");
+    let error = merge(
+        &request(vec![source("evil", &absolute, 0)]),
+        &dir,
+        &dir.join("b.zip"),
+    )
+    .expect_err("绝对路径条目必须拒绝");
     assert!(
         error.to_string().contains("绝对路径"),
         "错误应指出绝对路径条目: {error}"
@@ -365,7 +390,10 @@ fn same_input_twice_produces_same_sha1() {
         Some(serde_json::json!([40, 60])),
         &[
             ("assets/minecraft/texts/one.txt", b"one".as_slice()),
-            ("assets/minecraft/lang/zh_cn.json", r#"{"a":"1","b":"低"}"#.as_bytes()),
+            (
+                "assets/minecraft/lang/zh_cn.json",
+                r#"{"a":"1","b":"低"}"#.as_bytes(),
+            ),
         ],
     );
     write_source(
@@ -374,7 +402,10 @@ fn same_input_twice_produces_same_sha1() {
         Some(serde_json::json!([50, 90])),
         &[
             ("assets/minecraft/texts/two.txt", b"two".as_slice()),
-            ("assets/minecraft/lang/zh_cn.json", r#"{"b":"高","c":"3"}"#.as_bytes()),
+            (
+                "assets/minecraft/lang/zh_cn.json",
+                r#"{"b":"高","c":"3"}"#.as_bytes(),
+            ),
         ],
     );
     let request = request(vec![source("low", &low, 0), source("high", &high, 10)]);
@@ -425,7 +456,11 @@ fn first_policy_keeps_lower_layer() {
     request.policy = Policy::First;
     let (report, entries) = merge_ok(&request, &dir, &out);
 
-    assert_eq!(entry(&entries, path), Some(b"low".as_slice()), "first 策略低层胜");
+    assert_eq!(
+        entry(&entries, path),
+        Some(b"low".as_slice()),
+        "first 策略低层胜"
+    );
     assert_eq!(report.conflicts.len(), 1);
     assert_eq!(report.conflicts[0].winner, "low");
     assert_eq!(report.conflicts[0].losers, vec!["high".to_string()]);
@@ -468,7 +503,8 @@ fn requested_format_overrides_intersection_max() {
     assert_eq!(report.format, 99);
     assert_eq!((report.format_min, report.format_max), (50, 60));
     let mcmeta: serde_json::Value =
-        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta")).unwrap();
+        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta"))
+            .unwrap();
     assert_eq!(mcmeta["pack"]["pack_format"], 99);
     assert_eq!(mcmeta["pack"]["min_format"], 50);
     assert_eq!(mcmeta["pack"]["max_format"], 60);
@@ -494,7 +530,8 @@ fn modern_only_range_omits_supported_formats() {
 
     assert_eq!((report.format_min, report.format_max), (80, 80));
     let mcmeta: serde_json::Value =
-        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta")).unwrap();
+        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta"))
+            .unwrap();
     assert_eq!(mcmeta["pack"]["min_format"], 80);
     assert!(
         mcmeta["pack"]["supported_formats"].is_null(),
@@ -604,7 +641,10 @@ fn font_same_id_reports_json_conflict() {
         &low,
         46,
         None,
-        &[(path, br#"{"providers":[{"id":"glyph","type":"bitmap","file":"low.png"}]}"#.as_slice())],
+        &[(
+            path,
+            br#"{"providers":[{"id":"glyph","type":"bitmap","file":"low.png"}]}"#.as_slice(),
+        )],
     );
     write_source(
         &high,
@@ -626,7 +666,10 @@ fn font_same_id_reports_json_conflict() {
     assert_eq!(conflict.severity, Severity::Medium);
     assert_eq!(conflict.mode, ConflictMode::JsonConcat);
     assert!(
-        conflict.fields.iter().any(|field| field.contains("[id=glyph]")),
+        conflict
+            .fields
+            .iter()
+            .any(|field| field.contains("[id=glyph]")),
         "应指出同 id 定义差异: {:?}",
         conflict.fields
     );
@@ -720,8 +763,10 @@ fn stored_entries_are_passed_through() {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("pack.mcmeta", options).expect("写 pack.mcmeta");
-        zip.write_all(&mcmeta_bytes(46, None)).expect("写 pack.mcmeta 内容");
+        zip.start_file("pack.mcmeta", options)
+            .expect("写 pack.mcmeta");
+        zip.write_all(&mcmeta_bytes(46, None))
+            .expect("写 pack.mcmeta 内容");
         zip.start_file("assets/minecraft/texts/raw.txt", options)
             .expect("写 store 条目");
         zip.write_all(b"stored-bytes").expect("写 store 内容");
@@ -737,7 +782,9 @@ fn stored_entries_are_passed_through() {
     );
     let file = std::fs::File::open(&out).expect("打开输出");
     let mut archive = zip::ZipArchive::new(file).expect("输出是合法 zip");
-    let raw = archive.by_name("assets/minecraft/texts/raw.txt").expect("读输出条目");
+    let raw = archive
+        .by_name("assets/minecraft/texts/raw.txt")
+        .expect("读输出条目");
     assert_eq!(
         raw.compression(),
         zip::CompressionMethod::Stored,
@@ -750,8 +797,18 @@ fn out_of_order_priorities_read_from_winning_source() {
     let dir = work("out-of-order-priority");
     let high = dir.join("high.zip");
     let low = dir.join("low.zip");
-    write_source(&high, 46, None, &[("assets/ns/value.txt", b"high-priority".as_slice())]);
-    write_source(&low, 46, None, &[("assets/ns/value.txt", b"low-priority".as_slice())]);
+    write_source(
+        &high,
+        46,
+        None,
+        &[("assets/ns/value.txt", b"high-priority".as_slice())],
+    );
+    write_source(
+        &low,
+        46,
+        None,
+        &[("assets/ns/value.txt", b"low-priority".as_slice())],
+    );
     let request = request(vec![source("high", &high, 10), source("low", &low, 0)]);
     let out = dir.join("out.zip");
     let (report, entries) = merge_ok(&request, &dir, &out);
@@ -763,7 +820,11 @@ fn out_of_order_priorities_read_from_winning_source() {
     let bytes = std::fs::read(&out).expect("读取输出");
     let mut hasher = Sha1::new();
     hasher.update(&bytes);
-    let actual = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     assert_eq!(report.sha1, actual, "报告里的 sha1 必须与产物文件一致");
     assert_eq!(report.bytes, bytes.len() as u64);
 }
@@ -778,12 +839,16 @@ fn directory_entries_do_not_shift_raw_offsets() {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
-        zip.start_file("pack.mcmeta", options).expect("写 pack.mcmeta");
-        zip.write_all(&mcmeta_bytes(46, None)).expect("写 pack.mcmeta 内容");
+        zip.start_file("pack.mcmeta", options)
+            .expect("写 pack.mcmeta");
+        zip.write_all(&mcmeta_bytes(46, None))
+            .expect("写 pack.mcmeta 内容");
         zip.add_directory("assets/", options).expect("写目录条目");
-        zip.start_file("assets/ns/first.txt", options).expect("写 first");
+        zip.start_file("assets/ns/first.txt", options)
+            .expect("写 first");
         zip.write_all(b"first-content").expect("写 first 内容");
-        zip.start_file("assets/ns/second.txt", options).expect("写 second");
+        zip.start_file("assets/ns/second.txt", options)
+            .expect("写 second");
         zip.write_all(b"second-content").expect("写 second 内容");
         zip.finish().expect("关闭 fixture zip");
     }
@@ -810,14 +875,20 @@ fn corrupting_source_data_is_detected_when_verifying() {
         &source_path,
         46,
         None,
-        &[("assets/ns/blob.bin", b"payload-payload-payload-payload".as_slice())],
+        &[(
+            "assets/ns/blob.bin",
+            b"payload-payload-payload-payload".as_slice(),
+        )],
     );
 
     let (start, length) = {
         let file = std::fs::File::open(&source_path).expect("打开 fixture");
         let mut archive = zip::ZipArchive::new(file).expect("解析 fixture");
         let entry = archive.by_index_raw(1).expect("读条目");
-        (entry.data_start().expect("数据起点"), entry.compressed_size())
+        (
+            entry.data_start().expect("数据起点"),
+            entry.compressed_size(),
+        )
     };
     let mut bytes = std::fs::read(&source_path).expect("读取 fixture");
     let target = start as usize + (length as usize / 2);
@@ -842,8 +913,10 @@ fn stored_low_priority_source_yields_to_high_priority() {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("pack.mcmeta", options).expect("写 pack.mcmeta");
-        zip.write_all(&mcmeta_bytes(46, None)).expect("写 pack.mcmeta 内容");
+        zip.start_file("pack.mcmeta", options)
+            .expect("写 pack.mcmeta");
+        zip.write_all(&mcmeta_bytes(46, None))
+            .expect("写 pack.mcmeta 内容");
         zip.start_file("assets/demo/value.txt", options)
             .expect("写 store 条目");
         zip.write_all(b"from-low").expect("写 store 内容");
@@ -852,11 +925,55 @@ fn stored_low_priority_source_yields_to_high_priority() {
     let high = dir.join("high.zip");
     write_source(&high, 46, None, &[("assets/demo/value.txt", b"from-high")]);
     let out = dir.join("out.zip");
-    let (report, entries) =
-        merge_ok(&request(vec![source("low", &low, 0), source("high", &high, 10)]), &dir, &out);
+    let (report, entries) = merge_ok(
+        &request(vec![source("low", &low, 0), source("high", &high, 10)]),
+        &dir,
+        &out,
+    );
     assert_eq!(
         entry(&entries, "assets/demo/value.txt"),
         Some(b"from-high".as_slice())
     );
     assert_eq!(report.raw_copied, 1, "只有高层 deflate 条目走直拷");
+}
+
+#[test]
+fn large_directory_reaches_zip64_and_keeps_every_entry() {
+    const COUNT: usize = 70_000;
+    let dir = work("zip64-directory");
+    let src = dir.join("src.zip");
+    {
+        let file = std::fs::File::create(&src).expect("创建 fixture zip");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("pack.mcmeta", options)
+            .expect("写 pack.mcmeta");
+        zip.write_all(&mcmeta_bytes(46, None))
+            .expect("写 pack.mcmeta 内容");
+        for index in 0..COUNT {
+            zip.start_file(format!("assets/bulk/f{index:05}.bin"), options)
+                .expect("写批量条目");
+            zip.write_all(format!("v{index}").as_bytes())
+                .expect("写批量内容");
+        }
+        zip.finish().expect("关闭 fixture zip");
+    }
+    let out = dir.join("out.zip");
+    let (report, entries) = merge_ok(&request(vec![source("bulk", &src, 0)]), &dir, &out);
+    assert_eq!(report.entries, COUNT + 1);
+    assert_eq!(entries.len(), COUNT + 1);
+    let produced = std::fs::read(&out).expect("读回产物");
+    assert!(
+        produced.windows(4).any(|window| window == b"PK\x06\x06"),
+        "70,000 条应当写出 zip64 EOCD"
+    );
+    assert_eq!(report.raw_copied, COUNT, "全部批量条目都应走直拷");
+    assert_eq!(
+        entry(&entries, "assets/bulk/f00000.bin"),
+        Some(b"v0".as_slice())
+    );
+    let last = format!("assets/bulk/f{:05}.bin", COUNT - 1);
+    let expected = format!("v{}", COUNT - 1);
+    assert_eq!(entry(&entries, &last), Some(expected.as_bytes()));
 }
