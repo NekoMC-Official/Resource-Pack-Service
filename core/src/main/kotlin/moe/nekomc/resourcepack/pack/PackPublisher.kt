@@ -16,7 +16,6 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import moe.nekomc.resourcepack.api.BuildResult
 import moe.nekomc.resourcepack.config.RpsConfig
-import moe.nekomc.resourcepack.core.Hashing
 import moe.nekomc.resourcepack.core.ZipSource
 import moe.nekomc.resourcepack.delivery.FanoutController
 import moe.nekomc.resourcepack.merge.MergeResult
@@ -229,7 +228,8 @@ class PackPublisher(private val plugin: PackHost) {
                 plugin.logger().info("发布器已被替换，丢弃本次合成结果")
                 return
             }
-            val sha1 = Hashing.sha1Hex(created)
+            // 合并器在写出的同时算好了 SHA-1，这里不再整包回读一遍。
+            val sha1 = result.sha1()
             val builtAt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
                 .withZone(ZoneId.systemDefault())
                 .format(Instant.now())

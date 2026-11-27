@@ -18,6 +18,7 @@ public record MergeResult(
         List<Conflict> conflicts,
         ConflictSummary conflictSummary,
         List<String> warnings,
+        int rawCopied,
         long millis) {
 
     public record Layer(String id, int priority, int format, int entries) {
@@ -70,6 +71,7 @@ public record MergeResult(
         int high = conflictSummary == null ? 0 : conflictSummary.high();
         return "条目 " + entries + " / 去重 " + deduped + " / 冲突 " + total
                 + "（高 " + high + "）"
+                + " / 直拷 " + rawCopied
                 + " / 格式 " + format + "（" + formatMin + "-" + formatMax + "）"
                 + " / " + bytes + " 字节 / " + millis + "ms";
     }

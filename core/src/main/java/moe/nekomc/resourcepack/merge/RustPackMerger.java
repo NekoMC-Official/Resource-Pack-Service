@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import moe.nekomc.resourcepack.core.Hashing;
 import moe.nekomc.resourcepack.core.ZipSource;
 
 /**
@@ -195,10 +196,11 @@ public final class RustPackMerger implements Merger {
                 warnings.add(element.getAsString());
             }
         }
+        String sha1 = sha1(json, output, warnings);
         long millis = json.has("millis") ? json.get("millis").getAsLong() : (System.nanoTime() - started) / 1_000_000L;
         return new MergeResult(
                 output,
-                json.get("sha1").getAsString(),
+                sha1,
                 json.get("bytes").getAsLong(),
                 json.get("entries").getAsInt(),
                 json.has("deduped") ? json.get("deduped").getAsInt() : 0,
@@ -209,7 +211,24 @@ public final class RustPackMerger implements Merger {
                 conflicts,
                 conflictSummary,
                 warnings,
+                integer(json, "rawCopied", 0),
                 millis);
+    }
+
+    private static String sha1(JsonObject json, Path output, List<String> warnings) {
+        String reported = json.has("sha1") && json.get("sha1").isJsonPrimitive()
+                ? json.get("sha1").getAsString()
+                : "";
+        if (reported.length() == 40
+                && reported.chars().allMatch(c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return reported;
+        }
+        warnings.add("rps-pack 返回的 sha1 不是 40 位小写十六进制，已按产物重新计算");
+        try {
+            return Hashing.sha1Hex(output);
+        } catch (IOException error) {
+            throw new IllegalStateException("无法按产物重新计算 SHA-1", error);
+        }
     }
 
     private static MergeResult.ConflictSummary conflictSummary(

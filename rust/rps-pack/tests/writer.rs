@@ -1,11 +1,12 @@
 //! 自写 zip writer 的契约：可读回、时间戳归一、字节确定、zip64 目录。
 
-use std::io::Read;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use rps_pack::writer::ZipArchiveWriter;
 use sha1::{Digest, Sha1};
-use zip::ZipArchive;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 fn work(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -118,6 +119,58 @@ fn finish_reports_real_sha1_and_size() {
     let actual = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     assert_eq!(stats.sha1, actual);
     assert_eq!(stats.bytes, bytes.len() as u64);
+}
+
+/// 直拷路径（add_raw）同样参与整包 SHA-1，且内容可原样读回。
+#[test]
+fn add_raw_participates_in_sha1_and_round_trips() {
+    let dir = work("writer-raw");
+    let source = dir.join("source.zip");
+    {
+        let mut zip = ZipWriter::new(File::create(&source).expect("建来源"));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored);
+        zip.start_file("assets/raw.txt", options).expect("写来源条目");
+        zip.write_all(b"raw content from source").expect("写内容");
+        zip.finish().expect("收尾来源");
+    }
+
+    let (name, crc, compressed, size, offset) = {
+        let mut archive =
+            ZipArchive::new(File::open(&source).expect("打开来源")).expect("解析来源");
+        let entry = archive.by_index(0).expect("首条");
+        (
+            entry.name().expect("名称").to_string(),
+            entry.crc32(),
+            entry.compressed_size(),
+            entry.size(),
+            entry.data_start().expect("数据偏移"),
+        )
+    };
+
+    let path = dir.join("out.zip");
+    let mut writer = ZipArchiveWriter::create(&path, 6).expect("创建写入器");
+    let mut data = File::open(&source).expect("打开来源");
+    data.seek(SeekFrom::Start(offset)).expect("定位数据");
+    writer
+        .add_raw(&name, crc, compressed, size, 0, &mut data)
+        .expect("直拷条目");
+    let stats = writer.finish().expect("收尾");
+
+    let bytes = std::fs::read(&path).expect("读取产物");
+    let mut hasher = Sha1::new();
+    hasher.update(&bytes);
+    let actual = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    assert_eq!(stats.sha1, actual);
+    assert_eq!(stats.bytes, bytes.len() as u64);
+    assert_eq!(stats.raw_copied, 1);
+
+    let mut archive = ZipArchive::new(File::open(&path).expect("打开产物")).expect("解析产物");
+    let mut entry = archive.by_index(0).expect("首条");
+    assert_eq!(entry.compression(), CompressionMethod::Stored);
+    let mut read = Vec::new();
+    entry.read_to_end(&mut read).expect("读内容");
+    assert_eq!(read, b"raw content from source");
 }
 
 #[test]

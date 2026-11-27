@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+import moe.nekomc.resourcepack.core.Hashing;
 import moe.nekomc.resourcepack.core.ZipSource;
 import moe.nekomc.resourcepack.pack.EntryManifest;
 import org.junit.jupiter.api.Assumptions;
@@ -105,9 +106,13 @@ class RustPackMergerTest {
         List<ZipSource> sources = List.of(
                 new ZipSource("a", true, zip(dir.resolve("a.zip"), Map.of("assets/x.txt", "x")), "", 0, List.of()),
                 new ZipSource("b", true, zip(dir.resolve("b.zip"), Map.of("assets/y.txt", "y")), "", 1, List.of()));
-        String first = merger.merge(sources, 46, "d", dir.resolve("one.zip")).sha1();
-        String second = merger.merge(sources, 46, "d", dir.resolve("two.zip")).sha1();
+        Path one = dir.resolve("one.zip");
+        Path two = dir.resolve("two.zip");
+        String first = merger.merge(sources, 46, "d", one).sha1();
+        String second = merger.merge(sources, 46, "d", two).sha1();
         assertEquals(first, second, "同输入两次合并必须同 sha1");
+        assertEquals(Hashing.sha1Hex(one), first, "报告的 sha1 必须与磁盘产物一致");
+        assertEquals(Hashing.sha1Hex(two), second, "报告的 sha1 必须与磁盘产物一致");
     }
 
     @Test

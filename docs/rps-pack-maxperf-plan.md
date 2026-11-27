@@ -923,4 +923,33 @@ max-concurrent 夹在 1..1024，jitter-ms 夹在 0..10000，retry 夹在 0..3；
 | P2-8 config.yml 无末尾换行 | 补回换行。 |
 | P2-9 close 后仍可能发一包 | push 前复查 closed；push=0 的回收不再依赖 at 匹配，改为无条件幂等删除。 |
 
-明确保留的两处已知限制：Fabric 的重复回执去重仍以 (status, statuses.hash) 为准，只对 LOADED 完整；Fabric push 仍在异步线程读取玩家档案（需要平台层提供主线程快照接口后再改）。
+明确保留的一处已知限制：Fabric 的重复回执去重仍以 (status, statuses.hash) 为准，只对 LOADED 完整（P2-2）。
+
+## 31. S11：JVM 对接收尾（2026-11-28）
+
+### 31.1 去掉二次整包 SHA-1
+
+`PackPublisher.build` 原先在合并器返回后再调 `Hashing.sha1Hex(created)`，把刚写好的整包重读一遍。写出现在由 `ZipArchiveWriter` 边写边算（`WriteStats.sha1`），Rust 侧 `finish_reports_real_sha1_and_size` 已锁定「报告摘要 == 文件真实摘要」，因此 JVM 直接取 `result.sha1()` 即可。270 MB 的包省掉一次约 0.1 s 的整包读取。
+
+### 31.2 rawCopied 进合并结果与 /rps status
+
+`Report.rawCopied` 早已由 Rust 写出，但 JVM 没解析。现在 `MergeResult` 增加 `int rawCopied` 字段，`RustPackMerger` 读 `rawCopied`（缺省 0），`summary()` 输出「直拷 N」；`/rps status` 的「合成摘要」直接展示该字符串，无需改命令层。
+
+### 31.3 验证
+
+- `.tmp/build-all.ps1` BUILD SUCCESSFUL，EXIT=0。
+- core 21 套件 / 107 项（4 项需 `RPS_PACK_BIN` 跳过）+ paper 2 套件 / 7 项，0 失败；Rust 42 项（writer 7）。
+- jar：Paper 2,604,313 B ≤ 2,750,000；Fabric 2,751,810 B ≤ 2,900,000。
+
+### 31.4 审计修复（S11 复审后）
+
+| 编号 | 问题 | 处理 |
+| --- | --- | --- |
+| P1-1 | 摘要一致性测试只覆盖 deflate/store，未覆盖直拷热路径 | `tests/writer.rs` 新增 `add_raw_participates_in_sha1_and_round_trips`：直拷一条 stored 条目，断言报告摘要等于产物自算 SHA-1、内容可原样读回。 |
+| P1-2 | 报告里的 `sha1` 直接采信，自制/旧版二进制会污染快照与 ETag | `RustPackMerger.sha1(...)` 校验 40 位小写十六进制；不合规时记 warning 并用 `Hashing.sha1Hex(output)` 按产物重算。 |
+| P1-3 | JVM 测试只断言两次合并摘要相同 | `sameInputProducesSameSha1` 追加两条「报告摘要 == 磁盘文件 SHA-1」断言。 |
+| P2-4 | `rawCopied` 与摘要文本零覆盖 | `ConflictReportTest` 用 rawCopied=3 构造结果，断言 `summary()` 含「直拷 3」。 |
+
+保留：`PackHttpServer` 首建前后的 ETag 仍有两个来源（发布后统一走快照值）；
+`Hashing.sha1Hex(Path)` 因为成为回退路径而不再是死代码；docs 的「4 项跳过」由
+`RustPackMergerTest.binary()` + `Assumptions.assumeTrue` 门控。
