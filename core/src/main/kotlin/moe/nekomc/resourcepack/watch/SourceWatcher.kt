@@ -27,6 +27,11 @@ class SourceWatcher(
     @Volatile
     private var task: Scheduler.Cancellable? = null
 
+    /** 已发现变动但还没到防抖窗口；下一轮继续触发，不会丢。 */
+    @Volatile
+    private var pendingChange = false
+    private var lastFireAt = 0L
+
     @Synchronized
     fun start() {
         if (task != null) {
@@ -46,6 +51,7 @@ class SourceWatcher(
         task = null
         current?.cancel()
         stamps.clear()
+        pendingChange = false
     }
 
     /** 定时快照比较；任何异常都在这里吞掉，否则周期任务会被平台停掉。 */
@@ -70,7 +76,13 @@ class SourceWatcher(
             }
             stamps.keys.retainAll(seen)
             if (changed) {
+                pendingChange = true
+            }
+            val now = System.currentTimeMillis()
+            if (pendingChange && now - lastFireAt >= DEBOUNCE_MILLIS) {
                 onChange.run()
+                lastFireAt = now
+                pendingChange = false
             }
             // 回调成功后再落新快照；回调抛错时下一轮仍能看到旧值并重试。
             stamps.putAll(pending)
@@ -93,6 +105,8 @@ class SourceWatcher(
     }
 
     private companion object {
+        /** 变动后的合并窗口：连续写入只触发一次重建。 */
+        private const val DEBOUNCE_MILLIS = 300L
         private const val MISSING = "missing"
         private const val ERROR = "error"
     }

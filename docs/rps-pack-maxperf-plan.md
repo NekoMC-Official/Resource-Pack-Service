@@ -764,4 +764,18 @@ S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11 → S
 - **P2 zip64 阈值统一**：本地头与中央目录都以 `>=` 判定，避免 0xFFFFFFFF 边界写出歧义目录。
 
 验证：`cargo test --offline` **36 项全绿**（lib 4 + merge 24 + mcmeta 2 + writer 6），新增 `zip64_directory_starts_at_65535_entries`（65,534 条不写 EOCD64、65,535 条写）与 `stored_low_priority_source_yields_to_high_priority`（低层 Stored、高层 Deflate 时仍取高层字节且只直拷 1 条）。产物未变：W1 270,173,083 B / 469 条 / 468 直拷，墙钟 231 / 315 ms；W2 44,053,664 B / 5,063 条 / 182 冲突 / 5,062 直拷，墙钟 362 / 261 ms。全量构建 BUILD SUCCESSFUL，jar 体积守卫通过：Paper 2,521,536 B、Fabric 2,670,516 B。
+## 27. S8：输入未变短路与 watch 防抖（2026-11-28）
+
+### 27.1 实现
+
+- **构建指纹**：新增 `core/src/main/java/moe/nekomc/resourcepack/pack/SourceFingerprint.java`（SHA-256、字段间以 0 字节分隔，null 与空串等价）。`PackPublisher.fingerprintOf` 收进影响产物内容的配置（`pack-format`、`description`）与每个参与来源的元信息（id、文件路径、enabled、priority、声明 sha1、version、文件大小 + 修改时间）。
+- **短路**：`PackPublisher.build` 在创建 staging 之前比较指纹；与上一轮成功构建相同且 `merged.zip` 存在时直接 `completeWaiters(buildResult(), round)` 并返回，不再起 `rps-pack` 进程、不重写状态、不重复下发。指纹只在成功路径末尾更新，失败不会污染。
+- **watch 防抖**：`SourceWatcher` 增加 `DEBOUNCE_MILLIS = 300` 与 `pendingChange`：变动先记账，距上次触发不足 300 ms 就留到下一轮，连续写入只触发一次重建；回调抛错时快照不落、`pendingChange` 保留，下一轮重试。
+- 短路只发生在内存态：插件重启后指纹为空，第一次构建必然重建，所以升级 jar 不会复用旧产物。
+
+### 27.2 验证
+
+- 新增 `SourceFingerprintTest`（3 例：同输入同摘要且长度 64、字段顺序/拼接不可混淆、null 与空串等价）。
+- `gradle build`：core 19 套件 / **96 项**、paper 2 套件 / 7 项，0 失败；共 103 项。
+- 短路效果只能在真服观察：`watch` 周期内改一个无关文件不会再来一次外部进程；`/rps build` 在输入未变时返回当前版本而不是重建（需要强制重建时 touch 来源文件即可改变指纹）。
 

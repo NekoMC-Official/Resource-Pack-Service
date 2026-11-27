@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import moe.nekomc.resourcepack.api.BuildResult
+import moe.nekomc.resourcepack.config.RpsConfig
 import moe.nekomc.resourcepack.core.Hashing
 import moe.nekomc.resourcepack.core.ZipSource
 import moe.nekomc.resourcepack.merge.MergeResult
@@ -43,6 +44,9 @@ class PackPublisher(private val plugin: PackHost) {
 
     /** 本实例是否仍然有效；reload / onDisable 会把旧实例作废，在途构建据此放弃结果。 */
     private val active = AtomicBoolean(true)
+
+    /** 上一轮成功构建的输入指纹；输入未变时直接复用产物，不再起外部进程。 */
+    private val lastFingerprint = AtomicReference<String?>(null)
 
     fun snapshot(): PackSnapshot = current.get()
 
@@ -164,6 +168,12 @@ class PackPublisher(private val plugin: PackHost) {
         val outputDir = config.outputDir()
         Files.createDirectories(outputDir)
         val target = outputDir.resolve("merged.zip")
+        val fingerprint = fingerprintOf(sources, config)
+        if (fingerprint == lastFingerprint.get() && Files.isRegularFile(target) && Files.size(target) > 0L) {
+            plugin.logger().fine("输入未变，跳过重建（保持当前版本）")
+            completeWaiters(buildResult(), round)
+            return
+        }
         // 跨实例串行化：reload 会换发布器，但输出目录只有一份，旧实例的在途构建不能与新实例同时写。
         buildLock.lock()
         var staging: Path? = null
@@ -229,6 +239,7 @@ class PackPublisher(private val plugin: PackHost) {
             } else {
                 delivery.publish(url, sha1)
             }
+            lastFingerprint.set(fingerprint)
             plugin.logger().info(
                 "合成完成：第 " + version + " 版 / " + sources.size + " 个来源 / " + result.summary()
                         + (if (url.isBlank()) " / 无下载地址" else " / " + url)
@@ -274,6 +285,29 @@ class PackPublisher(private val plugin: PackHost) {
                 }
             }
         }
+    }
+
+    /** 输入指纹：影响产物内容的配置 + 每个来源的元信息与文件大小/修改时间。 */
+    private fun fingerprintOf(sources: List<moe.nekomc.resourcepack.api.PackSource>, config: RpsConfig): String {
+        val fingerprint = SourceFingerprint.create()
+        fingerprint.add(config.packFormat().toString())
+        fingerprint.add(config.description())
+        sources.forEach { source ->
+            fingerprint.add(source.id())
+            fingerprint.add(source.enabled().toString())
+            fingerprint.add(source.priority().toString())
+            fingerprint.add(source.sha1())
+            fingerprint.add(source.version())
+            val file = source.file()
+            fingerprint.add(
+                if (Files.isRegularFile(file)) {
+                    Files.size(file).toString() + ":" + Files.getLastModifiedTime(file).toMillis()
+                } else {
+                    "missing"
+                }
+            )
+        }
+        return fingerprint.hex()
     }
 
     private fun recordFailure(error: Throwable, round: Int) {
