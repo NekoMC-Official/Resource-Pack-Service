@@ -258,7 +258,9 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
     pack.insert("pack_format".to_string(), serde_json::json!(format));
     pack.insert("min_format".to_string(), serde_json::json!(format_min));
     pack.insert("max_format".to_string(), serde_json::json!(format_max));
-    if format < 65 {
+    // 26.x 客户端按 min_format 校验：只要区间下界落在 15..=64，
+    // 就必须同时给出 supported_formats，否则判定元数据损坏并卸载整包。
+    if format_min < 65 {
         pack.insert(
             "supported_formats".to_string(),
             serde_json::json!([format_min, format_max]),

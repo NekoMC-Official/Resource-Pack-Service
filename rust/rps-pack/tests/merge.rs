@@ -472,7 +472,34 @@ fn requested_format_overrides_intersection_max() {
     assert_eq!(mcmeta["pack"]["pack_format"], 99);
     assert_eq!(mcmeta["pack"]["min_format"], 50);
     assert_eq!(mcmeta["pack"]["max_format"], 60);
-    assert!(mcmeta["pack"]["supported_formats"].is_null());
+    // 26.x 客户端按 min_format 校验：下界 50 落在 15..=64，必须给出 supported_formats
+    assert_eq!(
+        mcmeta["pack"]["supported_formats"],
+        serde_json::json!([50, 60])
+    );
+}
+
+#[test]
+fn modern_only_range_omits_supported_formats() {
+    let dir = work("format-modern-only");
+    let low = dir.join("low.zip");
+    let high = dir.join("high.zip");
+    write_source(&low, 70, Some(serde_json::json!([70, 80])), &[]);
+    write_source(&high, 80, Some(serde_json::json!([80, 97])), &[]);
+    let out = dir.join("out.zip");
+
+    let mut request = request(vec![source("low", &low, 0), source("high", &high, 10)]);
+    request.format = 97;
+    let (report, entries) = merge_ok(&request, &dir, &out);
+
+    assert_eq!((report.format_min, report.format_max), (80, 80));
+    let mcmeta: serde_json::Value =
+        serde_json::from_slice(entry(&entries, "pack.mcmeta").expect("输出含 pack.mcmeta")).unwrap();
+    assert_eq!(mcmeta["pack"]["min_format"], 80);
+    assert!(
+        mcmeta["pack"]["supported_formats"].is_null(),
+        "下界 >=65 的纯新格式包不需要 supported_formats"
+    );
 }
 
 #[test]
