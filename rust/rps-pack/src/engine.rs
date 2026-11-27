@@ -200,18 +200,20 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
     order.sort_by_key(|&index| (request.sources[index].priority, index));
 
     // 先只扫中央目录：拿到条目元数据与各来源的 pack.mcmeta。
-    let mut readers: Vec<SourceReader> = Vec::with_capacity(order.len());
-    let mut scanned_total = 0usize;
-    for &index in &order {
-        let source = &request.sources[index];
-        let path = resolve(project_root, &source.path);
-        readers.push(SourceReader::open(
-            &path,
-            &source.id,
-            source.priority,
-            &mut scanned_total,
-        )?);
-    }
+    let specs: Vec<crate::scan::SourceSpec> = order
+        .iter()
+        .map(|&index| {
+            let source = &request.sources[index];
+            crate::scan::SourceSpec {
+                id: source.id.clone(),
+                priority: source.priority,
+                path: resolve(project_root, &source.path),
+            }
+        })
+        .collect();
+    let scan_started = Instant::now();
+    let mut readers = crate::scan::open_sources(&specs, crate::scan::scan_threads(specs.len()))?;
+    let scan_ms = scan_started.elapsed().as_millis();
 
     let mut ranges: Vec<(String, i64, i64)> = Vec::new();
     for reader in &readers {
@@ -306,6 +308,9 @@ pub fn merge(request: &Request, project_root: &Path, output: &Path) -> Result<Re
     warnings.extend(namespace_warnings(&entries));
 
     let raw_bytes: u64 = entries.values().map(|winner| winner.size).sum();
+    if std::env::var_os("RPS_TRACE").is_some() {
+        eprintln!("[rps-pack] scan={scan_ms}ms total={}ms", started.elapsed().as_millis());
+    }
     let stats = write_zip(&mut entries, &mut readers, output, request.verify_sources)?;
     let bytes = stats.bytes;
     let sha1_hex = stats.sha1.clone();

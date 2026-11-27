@@ -61,6 +61,71 @@ pub struct SourceReader {
     raw: File,
 }
 
+/// 并行扫描的任务描述：每个来源一个，结果按 spec 顺序返回。
+pub struct SourceSpec {
+    pub id: String,
+    pub priority: i64,
+    pub path: PathBuf,
+}
+
+/// 并行度：来源少于 4 个保持 1；默认留一半核给 JVM、最多 4，环境变量 RPS_THREADS 可覆盖。
+pub fn scan_threads(sources: usize) -> usize {
+    if sources < 4 {
+        return 1;
+    }
+    if let Ok(text) = std::env::var("RPS_THREADS") {
+        if let Ok(value) = text.trim().parse::<usize>() {
+            return value.clamp(1, 8);
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|parallelism| (parallelism.get() / 2).clamp(1, 4))
+        .unwrap_or(1)
+}
+
+/// 按 specs 顺序扫描多个来源；并行时结果仍按原顺序收集，错误按顺序报告（确定性）。
+pub fn open_sources(specs: &[SourceSpec], threads: usize) -> Result<Vec<SourceReader>> {
+    if threads <= 1 || specs.len() <= 1 {
+        let mut readers = Vec::with_capacity(specs.len());
+        let mut scanned = 0usize;
+        for spec in specs {
+            readers.push(SourceReader::open(&spec.path, &spec.id, spec.priority, &mut scanned)?);
+        }
+        return Ok(readers);
+    }
+    let mut slots: Vec<Option<Result<SourceReader>>> = (0..specs.len()).map(|_| None).collect();
+    let chunk = specs.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (spec_chunk, slot_chunk) in specs.chunks(chunk).zip(slots.chunks_mut(chunk)) {
+            scope.spawn(move || {
+                let mut scanned = 0usize;
+                for (spec, slot) in spec_chunk.iter().zip(slot_chunk.iter_mut()) {
+                    *slot = Some(SourceReader::open(
+                        &spec.path,
+                        &spec.id,
+                        spec.priority,
+                        &mut scanned,
+                    ));
+                }
+            });
+        }
+    });
+    let mut readers = Vec::with_capacity(specs.len());
+    let mut total = 0usize;
+    for slot in slots {
+        let reader = match slot {
+            Some(result) => result?,
+            None => return err("并行扫描没有产出结果".to_string()),
+        };
+        total += reader.entries.len();
+        readers.push(reader);
+    }
+    if total > MAX_TOTAL_ENTRIES {
+        return err(format!("所有来源累计条目数超过上限 {MAX_TOTAL_ENTRIES}"));
+    }
+    Ok(readers)
+}
+
 impl SourceReader {
     /// 打开一个来源并扫描中央目录；不读取任何条目内容。
     pub fn open(

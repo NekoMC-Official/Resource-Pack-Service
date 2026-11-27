@@ -803,3 +803,43 @@ S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11 → S
 - 全量 `gradle build` BUILD SUCCESSFUL；core 19 套件 / 97 项 + paper 2 套件 / 7 项 = **104 项**（本地默认 4 项因缺少二进制而 skip，CI 设置 `RPS_PACK_BIN` 后不 skip）。
 - 常驻帧往返（Python 驱动同一进程，1 KB 单条目、20 帧）：**中位 0.945 ms**、均值 0.965、min 0.767、max 1.325 —— 相比一次性的 13.5–14.5 ms 降低一个数量级，达到 §10 的 1–3 ms 目标。
 - 首次合并仍需进程启动与二进制解出（`BundledRust.ensure`），这部分发生在插件启用/首次构建，不影响后续每次重建。
+
+## 29. S7：并行中央目录扫描（2026-11-28）
+
+### 29.1 为什么只并行「扫描」
+
+W2 的内部耗时在 S2 之后只剩三段：扫描中央目录（解压前的元数据）、resolve（冲突判定与 JSON 合并）、写出（直拷 + SHA-1）。扫描是唯一一块**天然按来源切分、结果与顺序无关**的工作；resolve 依赖前序胜者，写出是有序流，都不能乱序。所以这一轮只把 `open_sources` 并行化，其余保持单线程——避免为了 5% 付并发的复杂度。
+
+### 29.2 实现
+
+- `rust/rps-pack/src/scan.rs`：
+  - `pub struct SourceSpec { id, priority, path }`：只描述一个来源，便于按 spec 顺序收集结果。
+  - `pub fn scan_threads(sources: usize) -> usize`：来源少于 4 个直接返回 1（线程启动比扫描还贵）；否则默认 `available_parallelism()/2` 并夹在 1..=4（留一半核给 JVM 与写盘）；环境变量 `RPS_THREADS` 可覆盖并夹在 1..=8，用于复现与压测。
+  - `pub fn open_sources(specs, threads)`：单线程走原来的顺序循环；多线程用 `std::thread::scope`，按 `specs.chunks(ceil(len/threads))` 切片，每片配一个 `Option<Result<SourceReader>>` 槽位。**结果按 spec 顺序收集，错误按 spec 顺序报告**，因此产物与线程数无关（同一 fixture 在 1/2/4 线程下 SHA-1 完全相同）。
+- `engine.rs`：把原来的顺序 open 循环换成为 `Vec<SourceSpec>` 后调用 `open_sources(&specs, scan_threads(specs.len()))`；不引入新依赖（不用 rayon/crossbeam）。
+- **诊断开关**：设置 `RPS_TRACE=1` 时，在写出之前向 stderr 打一行 `[rps-pack] scan=<n>ms total=<n>ms`，用于区分扫描与写出的成本。成功路径上 JVM 不读 stderr；常驻会话把 stderr 追加到 `rps-pack-serve.log`，因此这个开关不会污染协议输出。
+
+### 29.3 实测（W2 等价 fixture：40 源 / 5,063 条 / 182 冲突 / 44,053,665 B）
+
+交错 9 轮（每轮依次跑 1/2/4 线程，抵消机器漂移），计的是进程内自报 millis：
+
+| 线程数 | 中位 | min | max | 相对 1 线程 |
+| --- | --- | --- | --- | --- |
+| 1 | 221 ms | 209 | 320 | 1.00× |
+| 2 | 187 ms | 184 | 257 | 1.18× |
+| 4 | **175 ms** | 169 | 194 | **1.26×** |
+
+- 达到 §17.4 的「W2 端到端 ≥ 1.10×」门槛；扫描段本身从 `scan=59ms` 降到 `scan=19ms`（约 3.1×），说明剩余时间确实在 resolve 与写出上，继续加线程不会更快。
+- 早先非交错的 5 轮里 4 线程曾显示更慢（254 vs 235 ms），是杀软扫描与页缓存冷热造成的方差；交错取样后趋势稳定，故以本表为准。
+- Tiny / Huge 档来源数少（Huge 典型 3 个），`scan_threads` 直接返回 1，不承担线程开销。
+
+### 29.4 测试
+
+新增 `rust/rps-pack/tests/scan.rs` 3 例：
+
+- `parallel_scan_matches_sequential_scan`：6 个来源分别用 1 线程与 4 线程扫描，逐字段比较 `id / priority / entries(index,name,crc,size,compressed,offset,raw_method) / mcmeta`。
+- `parallel_scan_reports_first_failing_source_in_order`：中间来源缺失时，错误必须指向该来源（而不是并行完成更早的另一个错误）。
+- `scan_threads_keeps_small_source_sets_single_threaded`：1/3 个来源保持单线程。
+
+`cargo test --offline`：**40 项全绿**（lib 4 + merge 24 + mcmeta 2 + writer 6 + serve 1 + scan 3）。
+
