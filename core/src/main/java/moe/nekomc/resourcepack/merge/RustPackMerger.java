@@ -23,7 +23,7 @@ import moe.nekomc.resourcepack.core.ZipSource;
  */
 public final class RustPackMerger implements Merger {
 
-    private static final int STDOUT_LIMIT = 1 << 20;
+    private static final int STDOUT_LIMIT = 8 << 20;
 
     private final Path binary;
     private final Path workDir;
@@ -305,11 +305,17 @@ public final class RustPackMerger implements Merger {
     private static String readLimited(Reader reader) throws IOException {
         char[] buffer = new char[4096];
         StringBuilder text = new StringBuilder();
+        boolean truncated = false;
         int read;
         while ((read = reader.read(buffer)) != -1) {
-            if (text.length() < STDOUT_LIMIT) {
-                text.append(buffer, 0, read);
+            if (text.length() + read > STDOUT_LIMIT) {
+                truncated = true;
+                break;
             }
+            text.append(buffer, 0, read);
+        }
+        if (truncated) {
+            throw new IOException("rps-pack 报告超过 " + STDOUT_LIMIT + " 字节，已拒绝解析");
         }
         return text.toString();
     }

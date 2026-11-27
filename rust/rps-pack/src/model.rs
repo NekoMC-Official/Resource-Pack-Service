@@ -24,6 +24,9 @@ pub struct Request {
     pub policy: Policy,
     #[serde(default = "default_json_merge")]
     pub json_merge: bool,
+    /// 直拷来源条目时是否解压校验 CRC（默认关闭，开启会放弃直拷的性能收益）。
+    #[serde(default)]
+    pub verify_sources: bool,
     #[serde(default)]
     pub sources: Vec<Source>,
 }
@@ -235,6 +238,18 @@ pub struct Report {
     pub bytes: u64,
     pub entries: usize,
     pub deduped: usize,
+    /// 所有胜出条目的解压后总字节数（压缩率分母）。
+    #[serde(rename = "rawBytes")]
+    pub raw_bytes: u64,
+    /// 输出字节 / 解压后总字节，越小说明压缩越有效。
+    pub ratio: f64,
+    /// 必须重新压缩的条目数（JSON 合并结果与不支持的来源压缩方法）。
+    pub recompressed: usize,
+    /// 压缩无效、退回 store 的条目数。
+    pub stored: usize,
+    /// 直接拷贝来源压缩字节的条目数。
+    #[serde(rename = "rawCopied")]
+    pub raw_copied: usize,
     pub format: i64,
     pub format_min: i64,
     pub format_max: i64,

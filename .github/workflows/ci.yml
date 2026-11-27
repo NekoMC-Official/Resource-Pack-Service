@@ -37,6 +37,10 @@ jobs:
         run: sed -i 's/\r$//' gradlew && chmod +x gradlew
       - name: Rust tests
         run: cargo test --manifest-path rust/rps-pack/Cargo.toml
+      - name: Check Windows target
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo check --manifest-path rust/rps-pack/Cargo.toml --target x86_64-pc-windows-msvc
       - name: Build plugin jar
         run: |
           cargo build --release --manifest-path rust/rps-pack/Cargo.toml
@@ -44,6 +48,8 @@ jobs:
       - name: Assert bundled merger
         run: |
           python3 -c "import glob,sys,zipfile; jars=[j for j in glob.glob('paper/build/libs/resource-pack-service-*.jar')+glob.glob('fabric/build/libs/resource-pack-service-fabric-*.jar') if not j.endswith('-plain.jar')]; sys.exit('没有匹配到任何待发布 jar') if not jars else None; bad=[j for j in jars if not [n for n in zipfile.ZipFile(j).namelist() if n.startswith('rps-pack/bin/rps-pack')]]; print('缺少内置合并器:', bad) if bad else print('内置合并器已随包:', len(jars), '个 jar'); sys.exit(1 if bad else 0)"
+      - name: Assert jar sizes
+        run: python3 tools/check_jar_size.py
       - name: Upload Paper jar
         uses: actions/upload-artifact@v7
         with:
