@@ -153,15 +153,17 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
 
     @Override
     public int push(UUID playerId, boolean force) {
+        return push(playerId, "", force);
+    }
+
+    /** 按指定摘要推送；sha1 为空时回退到最近一次发布的摘要。 */
+    @Override
+    public int push(UUID playerId, String sha1Override, boolean force) {
         if (playerId == null || closed) {
             return 0;
         }
-        ServerPlayer player = platform.player(playerId);
-        if (player == null) {
-            return 0;
-        }
         String url = lastUrl;
-        String sha1 = lastSha1;
+        String sha1 = sha1Override == null || sha1Override.isBlank() ? lastSha1 : sha1Override;
         if (url.isBlank()) {
             var publisher = platform.publisher();
             PackSnapshot snapshot = publisher == null ? null : publisher.snapshot();
@@ -178,12 +180,17 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
         Optional<net.minecraft.network.chat.Component> hint =
             prompt.isBlank() ? Optional.empty() : Optional.of(MiniMessages.parse(prompt));
         boolean needed = announceRequired;
-        platform.logger().info(LOG_PREFIX + "向玩家 " + player.getGameProfile().name() + " 推送资源包（必装提示=" + needed + "）：" + target);
         platform.runOnServer(() -> {
             ServerPlayer online = platform.player(playerId);
             if (online == null) {
+                var publisher = platform.publisher();
+                var controller = publisher == null ? null : publisher.fanoutOrNull();
+                if (controller != null) {
+                    controller.playerLeft(playerId);
+                }
                 return;
             }
+            platform.logger().info(LOG_PREFIX + "向玩家 " + online.getGameProfile().name() + " 推送资源包（必装提示=" + needed + "）：" + target);
             online.connection.send(new ClientboundResourcePackPushPacket(
                 UUID.randomUUID(), target, targetSha1, needed, hint));
             pushedSha1.put(playerId, targetSha1);
@@ -206,6 +213,11 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
     }
 
     @Override
+    public String loadedSha1(UUID player) {
+        return statuses.hash(player);
+    }
+
+    @Override
     public List<DeliveryStatusStore.Entry> recent(int limit) {
         return statuses.recent(limit);
     }
@@ -217,13 +229,26 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
         }
         UUID id = player.getUUID();
         long delay = Math.max(1L, joinDelayTicks) * 50L;
-        platform.scheduler().runAsyncTimer(delay, 0L, () -> push(id, false));
+        platform.scheduler().runAsyncTimer(delay, 0L, () -> {
+            var publisher = platform.publisher();
+            var controller = publisher == null ? null : publisher.fanout();
+            if (controller != null) {
+                controller.enqueue(java.util.List.of(id), lastSha1, true);
+            } else {
+                push(id, false);
+            }
+        });
     }
 
     /** 玩家下线：清掉当前状态，历史留给 /rps rejected。 */
     public void onQuit(UUID playerId) {
         statuses.remove(playerId);
         pushedSha1.remove(playerId);
+        var publisher = platform.publisher();
+        var controller = publisher == null ? null : publisher.fanoutOrNull();
+        if (controller != null) {
+            controller.playerLeft(playerId);
+        }
     }
 
     /** 客户端回执：mixin 已经把我们发的包交给这里。 */
@@ -257,6 +282,11 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
         }
         statuses.record(id, name, mapped, sha1);
         platform.statusChanged(id, name, mapped, sha1);
+        var publisher = platform.publisher();
+        var controller = publisher == null ? null : publisher.fanout();
+        if (controller != null) {
+            controller.onStatus(id, mapped, sha1);
+        }
         switch (action) {
             case SUCCESSFULLY_LOADED -> {
                 if (statusFeedback) {

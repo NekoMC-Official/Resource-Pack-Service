@@ -843,3 +843,84 @@ W2 的内部耗时在 S2 之后只剩三段：扫描中央目录（解压前的�
 
 `cargo test --offline`：**40 项全绿**（lib 4 + merge 24 + mcmeta 2 + writer 6 + serve 1 + scan 3）。
 
+## 30. S10：海量/瞬时推送（2026-11-28）
+
+### 30.1 目标与设计
+
+大型服一次更新要把同一个包推给上千人。直接对着在线列表 push 会在一瞬间打出上千个下载请求：出口带宽被抢满、客户端超时、服务端线程池排队。S10 把「推给谁、什么时候推、同时推几个」从各个平台的 onJoin 回调里收拢到一个控制器：
+
+- **入队去重**：同一个玩家在队列里只会有一条任务（pending 集合），重复调用不会叠加。
+- **已加载过滤**：入队时看一次 delivery.loadedSha1(player)，客户端已经持有同一 SHA-1 的包就直接丢弃，不浪费一次下载；派发时不再二次过滤，避免队列与异步 publish 之间摘要错位（见 30.6）。
+- **窗口控制**：同一时刻最多 max-concurrent 个下载在途；玩家回执（LOADED / DECLINED / FAILED / INVALID_URL）释放窗口。
+- **渐进升窗**：ramp: true 时从 8 起步，每 5 秒按本窗口失败率调整——失败率大于 2% 减半（不低于 8），小于 1% 增加 25%，直到 max-concurrent。
+- **进服抖动**：join: true 的任务在 [0, jitter-ms] 内随机延迟，避免整服同时登录时一起拉包；广播/force 推送不抖动。
+- **失败重试**：FAILED / INVALID_URL 在固定的 5s 重试延迟后重排一次，次数由 retry 控制；DECLINED（玩家自己拒绝）不重试。
+- **单 tick 上限**：每个 tick 最多派发 200 个，50ms 一个 tick，即峰值 4000 次派发/秒，远高于实际回执速度，但能防止一次性把队列灌进线程池。
+
+### 30.2 实现
+
+- 新增 core/src/main/kotlin/moe/nekomc/resourcepack/delivery/FanoutController.kt：
+  - 两个 PriorityQueue<Task>（joinQueue / broadcastQueue），排序键 = (readyAt, seq)；进服任务优先，但没到期时不会挡住已就绪的广播任务。Task(player, sha1, attempts, readyAt, seq)。
+  - inflight: HashMap<UUID, Inflight(sha1, at, attempts)> 记录在途下载，pending: HashSet<UUID> 做队列去重。
+  - enqueue(players, sha1, join) / onStatus(player, status, sha1) / playerLeft(player) / stats() / close()；所有状态在单锁内变更，push 在锁外调用，避免平台调度器回调时持锁；tick 用 ticking 标志防重入（Fabric 的 TickScheduler 是线程池）。
+  - 在途超过固定的 120s 没有回执的任务计一次 failed 并释放窗口——客户端断线、退回主菜单这类没有回执的情况不会永久占住窗口；玩家退服时 playerLeft 立即回收窗口并撤掉未派发任务。
+  - 迟到回执（回执 sha1 与在途任务不一致）只释放窗口并计 dropped，不消耗新代的重试额度。
+  - push 返回 0（平台拒绝/玩家不在线）时立即清掉在途并计 dropped，不占用窗口。
+- PackDelivery.java 新增 default String loadedSha1(UUID player)，默认空串 = 不知道，控制器就当没加载过。
+- PackPublisher：fanoutRef 懒建（用 config 的四个参数），supersede 时 getAndSet(null)?.close()；广播路径改为入队，没有控制器时回退旧的逐个 push。
+- Paper PackPusher / Fabric FabricPackDelivery：进服推送走 enqueue(List.of(uuid), lastSha1, true)；onStatus 把平台回执转发给控制器；onQuit 调 playerLeft；各自实现 loadedSha1（读本地状态表里的 hash）与 push(UUID, String sha1, boolean force)，让过滤、发送、回执绑定同一个摘要。
+- /rps push 的全体分支先走 fanout().enqueue，逐个 push 只在没有控制器时作为回退。
+- /rps status 新增一行「推送队列」：排队 / 下载中 / 已推送 / 已完成 / 失败 / 窗口。
+- **force 语义**：push.mode: force 用空 sha1 入队，跳过已加载过滤（force 就是要重推），但仍受窗口与单 tick 上限约束，不会绕过保护。
+
+### 30.3 配置（paper/src/main/resources/config.yml，Fabric 复用同一份）
+
+```yaml
+delivery:
+  fanout:
+    max-concurrent: 64
+    jitter-ms: 1500
+    retry: 1
+    ramp: true
+```
+
+max-concurrent 夹在 1..1024，jitter-ms 夹在 0..10000，retry 夹在 0..3；ramp 缺省 true。
+
+### 30.4 验证
+
+- core/src/test/java/moe/nekomc/resourcepack/delivery/FanoutControllerTest.java 4 例：已加载同 SHA-1 跳过（dropped=1、pushed=1）、窗口 2 时两个在途+一个排队、回执释放后继续派发、FAILED 重试一次后放弃、重复入队去重。
+- 同目录 FanoutControllerLifecycleTest.java 6 例：迟到回执只释放窗口且不吃重试、push 返回 0 立即回收、退服腾窗口、120s 超时与 close 后不发包、未到期进服任务不挡广播、失败率超 2% 降窗（用注入时钟推进）。
+- 全量 gradle build BUILD SUCCESSFUL；core **21 套件 / 107 项** + paper 2 套件 / 7 项 = **114 项**，0 失败（4 项 RustPackMerger 用例需要 RPS_PACK_BIN，未设时跳过）。
+- tools/check_jar_size.py：Paper 2,603,687 B ≤ 2,750,000；Fabric 2,751,160 B ≤ 2,900,000。
+- 本轮不动 Rust 侧，rps-pack 的 40 项测试与基准数字不受影响。
+
+### 30.5 明确未做（留 S10b）
+
+- HTTP 出口的并发连接上限与 503 安全网、egress-bps 全局限速：需要先有按连接的字节计数，属于 PackHttpServer 的改造，单独一轮。
+- 按玩家退避（同一个人连续失败时指数退避）与推送指标导出（Prometheus）：等有真实线上数据再定。
+- 跨服（BungeeCord/Velocity）统一排队：当前控制器在每个后端进程内独立工作，代理层只负责转发 URL；真正全局排队要在代理插件里做。
+
+### 30.6 审计修复（第 1 轮复审后）
+
+只读审计给出 1 条 P0 + 6 条 P1 + 9 条 P2，逐条处理如下：
+
+| 条目 | 处理 |
+| --- | --- |
+| P0 退服玩家占窗口 | 控制器新增 playerLeft(player)：在锁内清 inflight / pending / 两个队列；Paper onQuit 与 Fabric onQuit 都调它。 |
+| P1-1 回执不校验 sha1 | onStatus 先比在途摘要，不一致只释放窗口并计 dropped，不消耗重试。 |
+| P1-2 过滤与实发摘要错位 | 去掉派发时的二次过滤；PackDelivery 新增 push(UUID, String sha1, boolean force) 默认方法，Paper / Fabric 用传入摘要发送并记录 pushedSha1。 |
+| P1-3 重试路径重复入队 | pending.add 成功才重排；派发前复查 inflight.containsKey。 |
+| P1-4 降窗死代码 | push=0、超时、FAILED / INVALID_URL 三处自增 windowFailures；分母仍是本窗口派发数。 |
+| P1-5 未到期 join 阻塞广播 | 拆成 joinQueue / broadcastQueue 两个队列，takeReady 分别看队头。 |
+| P1-6 默认流量绕过控制器 | /rps push 的全体分支改为 enqueue；单个目标仍直连 push（一次一人，不构成拥塞）。 |
+| P2-1 publisher 双取 | onStatus 先取局部变量再调 fanout；Fabric 的同一处也已改成局部变量。 |
+| P2-2 Fabric 回执去重只对 LOADED 完整 | 保留：去重键仍是 (status, hash)，PENDING / FAILED 的重复回执会再进一次状态记录；控制器对无在途任务的回执直接忽略，不产生副作用。 |
+| P2-3 Fabric tick 可重入 | ticking 标志的置位覆盖整拍（含锁外的 push 循环），第二拍在锁内直接返回；异常路径在 catch 里复位。 |
+| P2-4 Fabric 异步线程读玩家档案 | push 不再在调用线程查玩家；日志与发包一起在主线程执行，玩家已离线时通知控制器 playerLeft 释放窗口。 |
+| P2-5 窗口下限越过上限 | floorWindow = min(maxConcurrent, 8)，降窗结果不会超过配置。 |
+| P2-6 计数非原子 | stats() 在锁内读取。 |
+| P2-7 文档写了不存在的配置键 | 本节改为「固定 5s 重试 / 固定 120s 超时」。 |
+| P2-8 config.yml 无末尾换行 | 补回换行。 |
+| P2-9 close 后仍可能发一包 | push 前复查 closed；push=0 的回收不再依赖 at 匹配，改为无条件幂等删除。 |
+
+明确保留的两处已知限制：Fabric 的重复回执去重仍以 (status, statuses.hash) 为准，只对 LOADED 完整；Fabric push 仍在异步线程读取玩家档案（需要平台层提供主线程快照接口后再改）。

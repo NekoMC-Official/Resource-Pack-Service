@@ -142,6 +142,12 @@ public final class PackPusher implements Listener, AutoCloseable, PackDelivery {
      * {@code provider.reject-message} 断开，避免被客户端内置文案抢先。</p>
      */
     public int push(UUID player, boolean force) {
+        return push(player, "", force);
+    }
+
+    /** 按指定摘要推送；sha1 为空时回退到最近一次发布的摘要。 */
+    @Override
+    public int push(UUID player, String sha1Override, boolean force) {
         if (player == null) {
             return 0;
         }
@@ -150,7 +156,7 @@ public final class PackPusher implements Listener, AutoCloseable, PackDelivery {
             return 0;
         }
         String url = lastUrl;
-        String sha1 = lastSha1;
+        String sha1 = sha1Override == null || sha1Override.isBlank() ? lastSha1 : sha1Override;
         if (url.isBlank()) {
             var publisher = plugin.publisher();
             PackSnapshot snapshot = publisher == null ? null : publisher.snapshot();
@@ -202,6 +208,11 @@ public final class PackPusher implements Listener, AutoCloseable, PackDelivery {
         return statuses.hash(player);
     }
 
+    @Override
+    public String loadedSha1(UUID player) {
+        return statuses.hash(player);
+    }
+
     /** 最近的状态，新的在前。 */
     public List<DeliveryStatusStore.Entry> recent(int limit) {
         return statuses.recent(limit);
@@ -211,7 +222,15 @@ public final class PackPusher implements Listener, AutoCloseable, PackDelivery {
     public void onJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
         player.getScheduler().execute(plugin,
-                () -> push(player.getUniqueId(), false),
+                () -> {
+                    var publisher = plugin.publisher();
+                    var controller = publisher == null ? null : publisher.fanout();
+                    if (controller != null) {
+                        controller.enqueue(java.util.List.of(player.getUniqueId()), lastSha1, true);
+                    } else {
+                        push(player.getUniqueId(), false);
+                    }
+                },
                 null,
                 Math.max(1L, joinDelayTicks));
     }
@@ -221,6 +240,11 @@ public final class PackPusher implements Listener, AutoCloseable, PackDelivery {
         UUID player = event.getPlayer().getUniqueId();
         statuses.remove(player);
         pushedSha1.remove(player);
+        var publisher = plugin.publisher();
+        var controller = publisher == null ? null : publisher.fanoutOrNull();
+        if (controller != null) {
+            controller.playerLeft(player);
+        }
     }
 
     @EventHandler
@@ -239,6 +263,11 @@ public final class PackPusher implements Listener, AutoCloseable, PackDelivery {
         if (mapped != null) {
             statuses.record(player.getUniqueId(), player.getName(), mapped, sha1);
             fire(player, mapped, sha1);
+            var current = plugin.publisher();
+            var controller = current == null ? null : current.fanout();
+            if (controller != null) {
+                controller.onStatus(player.getUniqueId(), mapped, sha1);
+            }
         }
         switch (status) {
             case SUCCESSFULLY_LOADED -> {

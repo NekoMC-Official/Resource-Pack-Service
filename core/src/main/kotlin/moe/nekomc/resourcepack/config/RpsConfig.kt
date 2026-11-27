@@ -34,6 +34,10 @@ class RpsConfig private constructor(
     private val httpPortNumber: Int,
     private val httpUrlPath: String,
     private val httpPublicUrl: String,
+    private val fanoutMaxConcurrent: Int,
+    private val fanoutJitterMs: Int,
+    private val fanoutRetry: Int,
+    private val fanoutRamp: Boolean,
     private val communityOn: Boolean,
     private val communityDirectory: Path,
     private val communityLayerPriority: Int,
@@ -108,6 +112,18 @@ class RpsConfig private constructor(
 
     /** 对外下载地址；非空时优先于自动拼装，适用于反代或 CDN。 */
     fun deliveryPublicUrl(): String = httpPublicUrl
+
+    /** 同时处于下载中的玩家上限（fanout 并发窗口）。 */
+    fun deliveryFanoutMaxConcurrent(): Int = fanoutMaxConcurrent
+
+    /** 进服推送的随机抖动上限（毫秒），避免同时进服打满出口。 */
+    fun deliveryFanoutJitterMs(): Int = fanoutJitterMs
+
+    /** 下载失败后的重试次数。 */
+    fun deliveryFanoutRetry(): Int = fanoutRetry
+
+    /** 是否按失败率渐进调整并发窗口。 */
+    fun deliveryFanoutRamp(): Boolean = fanoutRamp
 
     /** 是否加载社区资源包目录。 */
     fun communityEnabled(): Boolean = communityOn
@@ -234,6 +250,10 @@ class RpsConfig private constructor(
                 httpPortNumber = config.getInt("delivery.http.port", 25580).coerceIn(0, 65535),
                 httpUrlPath = config.getString("delivery.http.path", "/pack/merged.zip") ?: "/pack/merged.zip",
                 httpPublicUrl = (config.getString("delivery.http.public-url", "") ?: "").trim(),
+            fanoutMaxConcurrent = config.getInt("delivery.fanout.max-concurrent", 64).coerceIn(1, 1024),
+            fanoutJitterMs = config.getInt("delivery.fanout.jitter-ms", 1500).coerceIn(0, 10_000),
+            fanoutRetry = config.getInt("delivery.fanout.retry", 1).coerceIn(0, 3),
+            fanoutRamp = config.getBoolean("delivery.fanout.ramp", true),
             communityOn = config.getBoolean("community.enabled", true),
             communityDirectory = communityDir,
             communityLayerPriority = config.getInt("community.priority", 0),

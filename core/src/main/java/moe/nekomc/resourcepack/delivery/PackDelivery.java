@@ -15,6 +15,19 @@ public interface PackDelivery {
      */
     int push(UUID player, boolean force);
 
+    /**
+     * 按指定摘要推送；实现方应把它当作“本次实际发出的摘要”，回执与去重都以它为准。
+     * 默认实现忽略 sha1，老平台照旧用最近一次发布的摘要。
+     */
+    default int push(UUID player, String sha1, boolean force) {
+        return push(player, force);
+    }
+
+    /** 玩家当前已加载的包摘要；没有加载成功或平台不跟踪时返回空串。 */
+    default String loadedSha1(UUID player) {
+        return "";
+    }
+
     /** 当前对外下载地址（HTTP 出口或 delivery.http.public-url）；没有可用地址时返回空串。 */
     String baseUrl();
 

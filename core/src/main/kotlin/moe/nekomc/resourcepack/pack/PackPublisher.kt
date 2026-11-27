@@ -18,6 +18,7 @@ import moe.nekomc.resourcepack.api.BuildResult
 import moe.nekomc.resourcepack.config.RpsConfig
 import moe.nekomc.resourcepack.core.Hashing
 import moe.nekomc.resourcepack.core.ZipSource
+import moe.nekomc.resourcepack.delivery.FanoutController
 import moe.nekomc.resourcepack.merge.MergeResult
 import moe.nekomc.resourcepack.merge.Merger
 import moe.nekomc.resourcepack.merge.MergeUnavailableException
@@ -41,6 +42,7 @@ class PackPublisher(private val plugin: PackHost) {
     private val roundSeq = AtomicInteger(0)
     private val waiters = ConcurrentLinkedQueue<Waiter>()
     private val community = AtomicReference<List<ZipSource>>(emptyList())
+    private val fanoutRef = AtomicReference<FanoutController?>(null)
 
     /** 本实例是否仍然有效；reload / onDisable 会把旧实例作废，在途构建据此放弃结果。 */
     private val active = AtomicBoolean(true)
@@ -104,8 +106,35 @@ class PackPublisher(private val plugin: PackHost) {
     /** 作废本实例：在途构建发现 active 为 false 后不再落盘，也不再覆盖对外快照。 */
     fun supersede() {
         active.set(false)
+        fanoutRef.getAndSet(null)?.close()
         completeAllWaiters(BuildResult.unavailable("发布器已被替换"))
     }
+
+    /**
+     * 统一推送调度器；下发器未就绪时返回 null，调用方退回逐个推送。
+     */
+    fun fanout(): FanoutController? {
+        val delivery = plugin.delivery() ?: return null
+        fanoutRef.get()?.let { return it }
+        synchronized(this) {
+            fanoutRef.get()?.let { return it }
+            val config = plugin.config()
+            val created = FanoutController(
+                delivery,
+                plugin.scheduler(),
+                plugin.logger(),
+                config.deliveryFanoutMaxConcurrent(),
+                config.deliveryFanoutJitterMs(),
+                config.deliveryFanoutRetry(),
+                config.deliveryFanoutRamp(),
+            )
+            fanoutRef.set(created)
+            return created
+        }
+    }
+
+    /** 已存在的推送调度器；不创建。供退服等生命周期回调使用。 */
+    fun fanoutOrNull(): FanoutController? = fanoutRef.get()
 
     /** 合并实现的名字，用于状态展示。 */
     fun engineLabel(): String = try {
@@ -272,11 +301,19 @@ class PackPublisher(private val plugin: PackHost) {
         when (config.pushMode().lowercase(Locale.ROOT)) {
             "none" -> return
             "force" -> {
-                var pushed = 0
-                for (player in plugin.onlinePlayers()) {
-                    pushed += delivery.push(player.uniqueId(), true)
+                val targets = plugin.onlinePlayers().map { it.uniqueId() }
+                val controller = fanout()
+                if (controller != null) {
+                    // force 不看客户端已加载状态，空 sha1 表示无条件重推
+                    controller.enqueue(targets, result.sha1(), false)
+                    plugin.logger().info("按 force 排队重推 " + targets.size + " 名玩家")
+                } else {
+                    var pushed = 0
+                    for (player in plugin.onlinePlayers()) {
+                        pushed += delivery.push(player.uniqueId(), true)
+                    }
+                    plugin.logger().info("按 force 重推给 " + pushed + " 名玩家")
                 }
-                plugin.logger().info("按 force 重推给 " + pushed + " 名玩家")
             }
             else -> {
                 val message = config.notifyMessage()

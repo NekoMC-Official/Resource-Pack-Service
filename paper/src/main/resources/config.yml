@@ -35,6 +35,16 @@ output:
 delivery:
   # 玩家进服后延迟多少 tick 推送，1 表示下一 tick
   join-delay-ticks: 1
+  # 海量推送：并发窗口与排队策略（上千人同时在线也不会一次性全部发出）
+  fanout:
+    # 同一时刻最多有多少个下载在进行，进度回执会释放窗口
+    max-concurrent: 64
+    # 进服推送的随机延迟上限，避免整服同时拉包
+    jitter-ms: 1500
+    # 下载失败后重试次数（客户端明确拒绝不重试）
+    retry: 1
+    # 从 8 起步按成功率渐进放大窗口
+    ramp: true
   # 是否把客户端进度（加载成功/拒绝）回显给玩家
   status-feedback: true
   http:

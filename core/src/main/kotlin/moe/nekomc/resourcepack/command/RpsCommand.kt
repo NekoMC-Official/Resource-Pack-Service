@@ -85,6 +85,16 @@ class RpsCommand(private val plugin: CommandHost) {
         sender.sendMessage(PackMessages.field("社区资源包", communitySummary()))
         val building = plugin.publisher()?.building() == true
         sender.sendMessage(PackMessages.field("当前状态", if (building) "正在合成" else "空闲"))
+        val fanout = plugin.publisher()?.fanout()?.stats()
+        if (fanout != null) {
+            sender.sendMessage(
+                PackMessages.field(
+                    "推送队列",
+                    "排队 " + fanout.queued + " / 下载中 " + fanout.inflight + " / 已推送 " + fanout.pushed
+                        + " / 已完成 " + fanout.completed + " / 失败 " + fanout.failed + " / 窗口 " + fanout.window,
+                ),
+            )
+        }
         if (snapshot.error().isNotBlank()) {
             sender.sendMessage(PackMessages.error("上次构建失败：" + snapshot.error()))
         }
@@ -173,6 +183,16 @@ class RpsCommand(private val plugin: CommandHost) {
                 return
             }
             var pushed = 0
+        val publisher = plugin.publisher()
+        val controller = publisher?.fanout()
+        if (controller != null) {
+            val all = plugin.onlinePlayers()
+            controller.enqueue(all.map { it.uniqueId() }, publisher?.snapshot()?.sha1() ?: "", false)
+            sender.sendMessage(
+                PackMessages.ok("已把 " + all.size + " 名在线玩家排入推送队列" + if (force) "（强制）" else "")
+            )
+            return
+        }
             for (player in plugin.onlinePlayers()) {
                 pushed += delivery.push(player.uniqueId(), force)
             }
