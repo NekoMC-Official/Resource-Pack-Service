@@ -180,6 +180,7 @@ class PackHttpServerTest {
         Files.write(big, payload);
         PackHttpServer limited = new PackHttpServer(big, "127.0.0.1", 0, "/pack/merged.zip", 1, 0L);
         limited.start();
+        try {
         try (Socket first = new Socket()) {
             first.setReceiveBufferSize(16 * 1024);
             first.connect(new InetSocketAddress("127.0.0.1", limited.port()), 5000);
@@ -210,6 +211,8 @@ class PackHttpServerTest {
             Thread.sleep(50L);
         }
         assertEquals(200, recovered == null ? 0 : recovered.statusCode(), "断开后槽位应释放");
-        limited.close();
+        } finally {
+            limited.close();
+        }
     }
 }

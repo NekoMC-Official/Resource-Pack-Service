@@ -19,7 +19,7 @@ public record MergeResult(
         ConflictSummary conflictSummary,
         List<String> warnings,
         long rawBytes,
-    int rawCopied,
+        int rawCopied,
         long millis) {
 
     public record Layer(String id, int priority, int format, int entries) {

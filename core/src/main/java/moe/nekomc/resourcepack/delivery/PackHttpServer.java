@@ -35,7 +35,7 @@ public final class PackHttpServer implements AutoCloseable {
     private static final int DEFAULT_MAX_CONCURRENT = 64;
     // 每个在途下载占一个线程；上限压住配置误填，避免一次开出几千个线程。
     private static final int MAX_SLOTS = 256;
-    private static final int MAX_POOL_THREADS = 512;
+    private static final int MAX_POOL_THREADS = MAX_SLOTS + 8;
     private static final int MIN_POOL_THREADS = 8;
     private static final int TRANSFER_CHUNK = 64 * 1024;
     private static final long SLOT_WAIT_MILLIS = 100L;
@@ -51,10 +51,13 @@ public final class PackHttpServer implements AutoCloseable {
     private volatile HttpServer server;
     private volatile ExecutorService executor;
     private volatile int actualPort = -1;
-    private volatile String etagKey = "";
-    private volatile String etagValue = "";
+    private volatile EtagEntry etagEntry = new EtagEntry("", "");
     private volatile String publishedSha1 = "";
     private volatile String lastUrl = "";
+
+    /** 摘要缓存的键值对：一起替换，读者不会看到「新 key + 旧 value」。 */
+    private record EtagEntry(String key, String value) {
+    }
 
     public PackHttpServer(Path zipFile, String bind, int port, String urlPath) {
         this(zipFile, bind, port, urlPath, DEFAULT_MAX_CONCURRENT, 0L);
@@ -171,7 +174,7 @@ public final class PackHttpServer implements AutoCloseable {
                             long moved = channel.transferTo(position, want, target);
                             if (moved <= 0) {
                                 egress.refund(want);
-                                LOGGER.warning("客户端提前关闭，剩余 " + (size - position) + " 字节未发送");
+                                LOGGER.fine("客户端提前关闭，剩余 " + (size - position) + " 字节未发送");
                                 break;
                             }
                             egress.refund(want - (int) moved);
@@ -246,14 +249,13 @@ public final class PackHttpServer implements AutoCloseable {
     /** 按大小与修改时间缓存摘要，避免每次请求都把整包回读一遍。 */
     private String etagFor(Path file) throws IOException {
         String key = file + "|" + Files.size(file) + "|" + Files.getLastModifiedTime(file).toMillis();
-        String cached = etagKey;
-        if (cached != null && cached.equals(key)) {
-            return etagValue;
+        EtagEntry cached = etagEntry;
+        if (cached.key().equals(key)) {
+            return cached.value();
         }
-        String value = Sha1Hex.quote(sha1Of(file));
-        etagKey = key;
-        etagValue = value;
-        return value;
+        EtagEntry fresh = new EtagEntry(key, Sha1Hex.quote(sha1Of(file)));
+        etagEntry = fresh;
+        return fresh.value();
     }
 
     private static String sha1Of(Path file) {
@@ -281,8 +283,7 @@ public final class PackHttpServer implements AutoCloseable {
         this.lastUrl = url == null ? "" : url;
         // 摘要还会给状态页看；ETag 交给 etagFor 按文件实际内容算。
         this.publishedSha1 = sha1 == null ? "" : sha1;
-        this.etagKey = "";
-        this.etagValue = "";
+        this.etagEntry = new EtagEntry("", "");
     }
 
     /** 实际监听的端口；未启动时为 -1。 */
@@ -300,12 +301,12 @@ public final class PackHttpServer implements AutoCloseable {
         return bind;
     }
 
-    /** 最近一次发布的下载地址，仅用于状态显示。 */
     /** 最近一次发布的摘要；状态页用来对照。 */
     public String sha1() {
         return publishedSha1;
     }
 
+    /** 最近一次发布的下载地址，仅用于状态显示。 */
     public String lastUrl() {
         return lastUrl;
     }
