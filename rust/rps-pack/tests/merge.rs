@@ -938,6 +938,65 @@ fn stored_low_priority_source_yields_to_high_priority() {
 }
 
 #[test]
+fn large_stored_entry_is_raw_copied_end_to_end() {
+    let dir = work("merge-large-stored");
+    let source_path = dir.join("src.zip");
+    let big = rps_pack::scan::MAX_ENTRY_BYTES + 1;
+    {
+        let file = std::fs::File::create(&source_path).expect("创建大条目来源");
+        let mut zip = zip::ZipWriter::new(file);
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("pack.mcmeta", deflated)
+            .expect("写 pack.mcmeta");
+        zip.write_all(&mcmeta_bytes(97, None)).expect("写 mcmeta");
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("assets/large/blob.bin", stored)
+            .expect("写大条目");
+        let chunk = vec![9u8; 1 << 20];
+        let mut left = big;
+        while left > 0 {
+            let take = left.min(chunk.len() as u64) as usize;
+            zip.write_all(&chunk[..take]).expect("写大条目内容");
+            left -= take as u64;
+        }
+        zip.finish().expect("关闭大条目来源");
+    }
+    let out = dir.join("merged.zip");
+    let plain_request = request(vec![source("big", &source_path, 0)]);
+    let report = merge(&plain_request, &dir, &out).expect("合并大 stored 条目");
+    assert_eq!(report.raw_copied, 1);
+    {
+        let file = std::fs::File::open(&out).expect("打开产物");
+        let mut zip = zip::ZipArchive::new(file).expect("读取产物");
+        let mut entry = zip
+            .by_name("assets/large/blob.bin")
+            .expect("产物应包含大条目");
+        assert_eq!(entry.size(), big);
+        assert_eq!(
+            entry.compression(),
+            zip::CompressionMethod::Stored,
+            "大条目应保持直拷，不被重压"
+        );
+        let mut buffer = Vec::new();
+        entry.read_to_end(&mut buffer).expect("读取大条目内容");
+        assert_eq!(buffer.len() as u64, big);
+        assert!(
+            buffer.iter().all(|&byte| byte == 9),
+            "直拷内容与来源不一致"
+        );
+    }
+
+    // 开启来源校验再跑一遍：覆盖 verify_raw 的 stored 流式 CRC 分支。
+    let verified_out = dir.join("merged-verified.zip");
+    let mut verified = request(vec![source("big", &source_path, 0)]);
+    verified.verify_sources = true;
+    let report = merge(&verified, &dir, &verified_out).expect("带校验合并大 stored 条目");
+    assert_eq!(report.raw_copied, 1, "校验路径也应走直拷");
+}
+
+#[test]
 fn large_directory_reaches_zip64_and_keeps_every_entry() {
     const COUNT: usize = 70_000;
     let dir = work("zip64-directory");

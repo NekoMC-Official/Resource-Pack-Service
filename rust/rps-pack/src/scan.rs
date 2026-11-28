@@ -18,6 +18,8 @@ use crate::error::{MergeError, Result, err};
 
 /// 单条目解压后的大小上限：64MB。
 pub const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+/// stored 条目只做字节直拷，不需要整条读进内存，因此可以放宽得多。
+pub const MAX_RAW_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
 /// 所有来源累计（以及输出）条目数上限。
 pub const MAX_TOTAL_ENTRIES: usize = 500_000;
 
@@ -204,23 +206,31 @@ impl SourceReader {
                 MergeError::new(format!("来源 {source_id} 条目 {name} 不安全：{problem}"))
             })?;
             let size = entry.size();
-            if size > MAX_ENTRY_BYTES {
-                return err(format!(
-                    "来源 {source_id} 条目 {name} 解压后 {size} 字节，超过单条目上限 {MAX_ENTRY_BYTES}"
-                ));
-            }
             let method = match entry.compression() {
                 CompressionMethod::Stored => Some(0),
                 CompressionMethod::Deflated => Some(8),
                 _ => None,
             };
             // Stored 条目声明的大小必须与数据长度一致，否则直拷会写出坏包，退回解压路径。
-            let method = if matches!(method, Some(0)) && entry.compressed_size() != size {
-                None
-            } else {
-                method
-            };
+            let stored_mismatch = matches!(method, Some(0)) && entry.compressed_size() != size;
+            let method = if stored_mismatch { None } else { method };
             let offset = entry.data_start();
+            let copyable = matches!(method, Some(0)) && offset.is_some();
+            if copyable && size > MAX_RAW_ENTRY_BYTES {
+                return err(format!(
+                    "来源 {source_id} 条目 {name} 解压后 {size} 字节，超过单条目直拷上限 {MAX_RAW_ENTRY_BYTES}"
+                ));
+            }
+            if !copyable && size > MAX_ENTRY_BYTES {
+                let reason = if stored_mismatch {
+                    "（stored 声明的压缩长度与原始长度不一致，退回解压路径）"
+                } else {
+                    "；只有 stored 条目能直拷"
+                };
+                return err(format!(
+                    "来源 {source_id} 条目 {name} 解压后 {size} 字节，超过可解压上限 {MAX_ENTRY_BYTES}{reason}"
+                ));
+            }
             entries.push(EntryMeta {
                 index,
                 name,
@@ -248,6 +258,12 @@ impl SourceReader {
             .position(|meta| meta.name == "pack.mcmeta")
         {
             let meta = reader.entries[position].clone();
+            if meta.size > MAX_ENTRY_BYTES {
+                return err(format!(
+                    "来源 {source_id} 的 pack.mcmeta 有 {} 字节，超过解析上限 {MAX_ENTRY_BYTES}",
+                    meta.size
+                ));
+            }
             let bytes = reader.read(&meta)?;
             let parsed = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
                 MergeError::new(format!(
@@ -363,8 +379,8 @@ impl SourceReader {
         let source_id = self.id.clone();
         let slice = self.raw_slice(offset, compressed)?;
         match method {
-            0 => hash_capped(slice, size, name, &source_id),
-            8 => hash_capped(DeflateDecoder::new(slice), size, name, &source_id),
+            0 => hash_capped(slice, size, MAX_RAW_ENTRY_BYTES, name, &source_id),
+            8 => hash_capped(DeflateDecoder::new(slice), size, MAX_ENTRY_BYTES, name, &source_id),
             other => err(format!("来源 {source_id} 的压缩方式 {other} 暂不支持")),
         }
     }
@@ -446,11 +462,17 @@ fn read_capped<R: Read>(reader: R, declared: u64, name: &str, source_id: &str) -
     Ok(buffer)
 }
 
-fn hash_capped<R: Read>(reader: R, expected: u64, name: &str, source_id: &str) -> Result<String> {
+fn hash_capped<R: Read>(
+    reader: R,
+    expected: u64,
+    cap: u64,
+    name: &str,
+    source_id: &str,
+) -> Result<String> {
     let mut hasher = Sha1::new();
     let mut buffer = [0u8; 64 * 1024];
     let mut total = 0u64;
-    let mut reader = reader.take(MAX_ENTRY_BYTES + 1);
+    let mut reader = reader.take(cap + 1);
     loop {
         let read = reader
             .read(&mut buffer)
@@ -459,9 +481,9 @@ fn hash_capped<R: Read>(reader: R, expected: u64, name: &str, source_id: &str) -
             break;
         }
         total += read as u64;
-        if total > MAX_ENTRY_BYTES {
+        if total > cap {
             return err(format!(
-                "来源 {source_id} 条目 {name} 解压后超过单条目上限 {MAX_ENTRY_BYTES}"
+                "来源 {source_id} 条目 {name} 解压后超过单条目上限 {cap}"
             ));
         }
         hasher.update(&buffer[..read]);

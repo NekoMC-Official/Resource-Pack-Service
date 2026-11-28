@@ -46,6 +46,58 @@ fn specs(dir: &Path, count: usize) -> Vec<SourceSpec> {
 }
 
 #[test]
+fn large_stored_entry_is_copyable_while_large_deflated_entry_is_rejected() {
+    let dir = work("scan-large");
+    let big = rps_pack::scan::MAX_ENTRY_BYTES + 1;
+    let write_large = |path: &Path, method: zip::CompressionMethod| {
+        let file = std::fs::File::create(path).expect("创建大条目 fixture");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().compression_method(method);
+        zip.start_file("big/blob.bin", options).expect("写大条目");
+        let chunk = vec![7u8; 1 << 20];
+        let mut left = big;
+        while left > 0 {
+            let take = left.min(chunk.len() as u64) as usize;
+            zip.write_all(&chunk[..take]).expect("写大条目内容");
+            left -= take as u64;
+        }
+        zip.finish().expect("关闭大条目 fixture");
+    };
+
+    let stored = dir.join("stored.zip");
+    write_large(&stored, zip::CompressionMethod::Stored);
+    let specs = vec![SourceSpec {
+        id: "big".to_string(),
+        priority: 0,
+        path: stored,
+    }];
+    let readers = open_sources(&specs, 1).expect("stored 大条目应可扫描");
+    let meta = readers[0]
+        .entries
+        .iter()
+        .find(|meta| meta.name == "big/blob.bin")
+        .expect("找到大条目");
+    assert_eq!(meta.size, big);
+    assert_eq!(meta.raw_method, Some(0));
+
+    let deflated = dir.join("deflated.zip");
+    write_large(&deflated, zip::CompressionMethod::Deflated);
+    let specs = vec![SourceSpec {
+        id: "big".to_string(),
+        priority: 0,
+        path: deflated,
+    }];
+    let error = match open_sources(&specs, 1) {
+        Ok(_) => panic!("deflated 大条目应被拒绝"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("只有 stored 条目能直拷"),
+        "错误应说明只有 stored 能直拷: {error}"
+    );
+}
+
+#[test]
 fn parallel_scan_matches_sequential_scan() {
     let dir = work("scan-parallel");
     for index in 0..6 {

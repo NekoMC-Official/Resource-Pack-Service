@@ -180,6 +180,11 @@ impl ZipArchiveWriter {
                 "条目 {name} 的压缩方法 {method} 不支持直接拷贝"
             )));
         }
+        if method == 0 && compressed != uncompressed {
+            return Err(MergeError::new(format!(
+                "条目 {name} 的 stored 声明大小不一致：压缩 {compressed} 字节，原始 {uncompressed} 字节"
+            )));
+        }
         if uncompressed >= U32_MAX || compressed >= U32_MAX {
             return Err(MergeError::new(format!(
                 "条目 {name} 超过 4 GiB，当前写入器尚未支持（S6）"

@@ -18,7 +18,7 @@ use crate::model::{
     AssetKind, Conflict, ConflictMode, ConflictSource, ConflictSummary, Policy, Report, Request,
     Severity,
 };
-use crate::scan::{EntryMeta, MAX_ENTRY_BYTES, SourceReader, hex};
+use crate::scan::{EntryMeta, MAX_ENTRY_BYTES, MAX_RAW_ENTRY_BYTES, SourceReader, hex};
 use crate::writer::{WriteStats, ZipArchiveWriter};
 
 pub const PACK_MC_META: &str = "pack.mcmeta";
@@ -121,8 +121,14 @@ fn ensure_sha1(winner: &mut Winner, readers: &mut [SourceReader], name: &str) ->
     Ok(sha1)
 }
 
-/// 取条目内容（JSON 合并与冲突判定用）；调用方负责上限。
+/// 取条目内容（仅 JSON 合并用；冲突判定走 SHA-1），超过解压上限直接报错。
 fn body_bytes(winner: &Winner, readers: &mut [SourceReader], name: &str) -> Result<Vec<u8>> {
+    if winner.size > MAX_ENTRY_BYTES {
+        return err(format!(
+            "条目 {name} 有 {} 字节，超过逐字节比较上限 {MAX_ENTRY_BYTES}",
+            winner.size
+        ));
+    }
     match &winner.body {
         Body::Owned(bytes) => Ok(bytes.clone()),
         Body::Raw {
@@ -717,9 +723,9 @@ fn verify_raw(
                 }
                 hasher.update(&buffer[..read]);
                 total += read as u64;
-                if total > MAX_ENTRY_BYTES {
+                if total > MAX_RAW_ENTRY_BYTES {
                     return err(format!(
-                        "条目 {name} 解压后超过单条目上限 {MAX_ENTRY_BYTES} 字节，拒绝校验"
+                        "条目 {name} 解压后超过单条目直拷上限 {MAX_RAW_ENTRY_BYTES} 字节，拒绝校验"
                     ));
                 }
             }

@@ -18,7 +18,7 @@ raw copy 解决的是「不要重复压缩」，它把 W1 从 4.07 s 拉到 0.13
 | W1 超大（270 MB / 469 条） | ~0.25 s / 15–30 MB | **0.16–0.20 s / ≤25 MB** | mmap + 顺序标志 + 预分配 + 写时哈希 |
 | W2 超多（84 MB / 5,063 条） | ~0.47 s / 55 MB | **0.30–0.40 s / ≤40 MB** | 自写顺序 writer、紧凑元数据、并行扫描 |
 | 巨量（200 源 / 40 万条） | 未测，zip crate 固定开销约 8 s（估算） | **≤1.5 s / ≤150 MB** | 自写 writer（每条目 ~1.5 µs）+ 索引缓存 |
-| 单条巨型（1 GB） | 受 64 MB 条目上限阻断 | **≤1.2 s，支持 zip64**（descoped，见 §34.5） | 流式哈希、取消解压上限 |
+| 单条巨型（1 GB） | 受 64 MB 条目上限阻断 | **≤1.2 s，支持 zip64**（1 GB 目标 descoped，见 §34.5；stored 直拷到 1 GiB 已由 §38 交付） | 流式哈希、取消解压上限 |
 
 一句话：**先不做事，再少拷贝，最后才谈并行**。
 
@@ -536,7 +536,7 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 | W1 270 MB / 469 条 | 547 MB | 14–15 MB | **≤60 MB** |
 | W2 40 源 / 5,063 条 | 59–100 MB | 55 MB | **≤80 MB** |
 | 40 万条 | 未测（zip crate 估算 >1 GB） | — | **≤150 MB** |
-| 1 GB 单条 | 受 64 MB 条目上限阻断 | — | **≤48 MB 流式窗口** |
+| 1 GB 单条 | 受 64 MB 条目上限阻断 | — | **≤48 MB 流式窗口**（stored 条目已放宽到 1 GiB 直拷，见 §38；deflate/JSON 路径仍 64 MiB） |
 | JVM 侧（插件本体） | 常驻 <100 MB（未见尖峰） | — | 堆增量 **≤64 MB** |
 
 547 MB 的成因不是「Rust 吃内存」，而是**逐条目解压进 Vec + 再复制进 Blob + 冲突时算 sha1**：同一份数据在内存里出现 2–3 次。21.2 的铁律就是把「份数」压到 1。
@@ -601,7 +601,7 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 | 步 | 内容 | 产出 / 验收 |
 | --- | --- | --- |
 | S5 | Tiny 档：单线程、fs::read 直读、预分配、零线程 | 1 条微包 ≤14 ms；200 条/27 KB ≤18 ms |
-| S6 | Huge 档：mmap 窗口、>64 MB 单条流式、zip64（非临时写与 1 GB 目标 descoped，见 §34.5） | 270 MB ≤0.20 s / ≤60 MB；1 GB 单条 ≤1.2 s / ≤48 MB（descoped） |
+| S6 | Huge 档：mmap 窗口、>64 MB 单条流式、zip64（非临时写与 1 GB 目标 descoped，见 §34.5；stored 直拷 1 GiB 已由 §38 交付） | 270 MB ≤0.20 s / ≤60 MB；1 GB 单条 ≤1.2 s / ≤48 MB（descoped，stored 直拷部分已交付） |
 | S7 | Many 档 + 多核：thread::scope、有序提交环、64 条动态领取、RPS_THREADS | 扫描 ≥2.8×、合并+压缩 ≥3.0×（4 线程）；W2 ≥1.10×；W1 退化 ≤3% |
 
 ### 阶段 3：运行期（2 天）
@@ -1075,7 +1075,7 @@ S12 原计划给每个平台加专有 I/O 原语（Windows `FILE_FLAG_SEQUENTIAL
 
 - 两处提示位改动已回退，`git diff` 为空；不引入平台专有代码，也不再增加 I/O 提示位。热缓存下测不出收益，冷缓存未测——保持默认是保守选择，不等于冷缓存也没有收益。
 - **Linux / macOS 路径不做**：`copy_file_range` / `fcopyfile` 只能在两个 fd 之间搬字节，而 zip 的 SHA-1 必须覆盖写出的每一个字节（单趟哈希是本项目的核心收益之一），走内核零拷贝还得再读一遍补齐哈希，省不下来；`fadvise` / `F_NOCACHE` 属提示级，收益与 Windows 同类。本机没有 Linux 环境，CI 的共享 runner 只能做构建与功能验证，给不出可信的「<10% 收益」判定，按「不写无法验证的路径」处理。
-- **§22 的 S6「非临时写」与 §2 的 1 GB 单条目标**：据此降级为待办（descoped），本轮不再追；同一份 I/O 预算优先给 S14 的哈希重叠，因为后者有 34.4 的实测支撑。
+- **§22 的 S6「非临时写」与 §2 的 1 GB 单条目标**：据此降级为待办（descoped），本轮不再追（1 GB 单条中的 stored 直拷已由 §38 交付，剩余是非临时写与 ≥4 GiB zip64）；同一份 I/O 预算优先给 S14 的哈希重叠，因为后者有 34.4 的实测支撑。
 - 需要时仍有 `RPS_TRACE=1` 打印 `scan=<ms>` 与写入前的总耗时，可以判断瓶颈在扫描还是写出。
 
 ### 34.6 仍然清楚的边界
@@ -1164,3 +1164,32 @@ Rust 52 项（lib 7 + merge 26 + mcmeta 2 + writer 9 + serve 1 + scan 7）。新
 
 - 百分比按「去重前体积」算，含被覆盖条目，因此它是压缩率的保守下限，不等于「相对最大来源」的比例。
 - 外部/旧版 `rps-pack` 不报 `rawBytes` 时退化为不显示，不影响其它字段。
+
+## 38. 大条目直拷（2026-11-28）
+
+### 38.1 动机与边界
+
+- 此前任何单条目解压后超过 64 MiB 都直接失败；高清材质包里 100 MB 级 atlas 很常见。
+- 直拷路径只搬字节，不需要整条进内存，因此 stored 条目上限放宽到 1 GiB（`MAX_RAW_ENTRY_BYTES`）。
+- 需要解码的路径（deflate 重压、JSON 合并）仍受 64 MiB（`MAX_ENTRY_BYTES`）约束；冲突判定走 SHA-1，不读整条内容。
+- 扫描期判定：`size > 1 GiB` 拒绝；`size > 64 MiB` 且不是可直拷的 stored 条目也拒绝，报错写明「只有 stored 条目能直拷」。
+
+### 38.2 实现
+
+- `scan.rs`：新增 `pub const MAX_RAW_ENTRY_BYTES: u64 = 1024 * 1024 * 1024`；上限检查按 `copyable`（stored 且 `data_start()` 可得）分两路：直拷 1 GiB、其余 64 MiB。`read_capped` 仍按 `MAX_ENTRY_BYTES + 1` 截断（结果会整条进内存）；`hash_capped` 增加 `cap` 参数，stored 流式读到 1 GiB、deflate 仍 64 MiB（64 KiB 缓冲，只算 SHA-1）。
+- `engine.rs`：`verify_raw` 的 stored 分支按 `MAX_RAW_ENTRY_BYTES` 流式计算 CRC，deflate 分支保持 64 MiB；`body_bytes`（仅 JSON 合并用）对超过 64 MiB 的条目直接报错，不会把整条读进 `Vec`。
+- 写出端的 `add_raw` 保持流式；新增 stored 条目 `compressed == uncompressed` 的一致性检查，避免未来调用方写出坏条目。
+
+### 38.3 测试与复测
+
+- `tests/scan.rs` 新增 `large_stored_entry_is_copyable_while_large_deflated_entry_is_rejected`：64 MiB + 1 的 stored 条目被接受且 `raw_method = Some(0)`，同样大小的 deflated 条目报「只有 stored 条目能直拷」。
+- `tests/merge.rs` 新增 `large_stored_entry_is_raw_copied_end_to_end`：64 MiB + 1 字节的 stored 条目端到端合并，报告 `raw_copied = 1`，回读全部字节校验内容，并再以 `verify_sources = true` 跑一遍覆盖流式 CRC 分支。
+- Rust 54 项全绿：lib 7 + merge 27 + mcmeta 2 + writer 9 + serve 1 + scan 8。
+- 五档复测（release，单轮 3 次取中位）：micro 16.2 ms / small 17.0 / W1 141.7（内部 121，RSS 14.2 MB）/ W2 92.4（73，27.5 MB）/ many 916.5（899，158.1 MB）；W1/W2/many 的 sha1 与 §35 完全一致。
+
+### 38.4 已知边界
+
+- 单条超过 1 GiB 的 stored 条目仍拒绝；单条 ≥4 GiB 的 zip64 直拷未做，仍列在 §22 的 S6 剩余项。
+- 可合并 JSON（`lang` / `sounds.json` / `font` / `atlases`）若单条超过 64 MiB，会在 `body_bytes` 直接报错并让整次合并失败（实务上不会出现；需要时再改成 warn + 覆盖降级）。
+- 开启 `verify_sources` 时大 stored 条目会多读一遍算 CRC（流式，内存不受影响，耗时随字节数增加）。
+- JVM 侧无改动：合并仍由 `rps-pack` 完成，插件只消费报告。
