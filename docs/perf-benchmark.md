@@ -23,8 +23,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| CPU | AMD Ryzen 7 9700X（8 核 16 线程） |
-| 系统 | Windows 11 |
+| CPU | 8 核 16 线程 x86_64 |
+| 系统 | Windows |
 | JVM | Zulu 25（`C:/Program Files/Zulu/zulu-25`） |
 | Rust | rustc 1.100.0，release（LTO + strip） |
 | 计时 | ① 进程墙钟（PowerShell `Stopwatch` 包住整个子进程）② 工具自报 `millis`（只含合并逻辑） |
@@ -202,7 +202,7 @@ rust/rps-pack/target/release/rps-pack.exe merge \
 | --- | --- |
 | 对照对象 | ResourcePackManager 2.4.14，commit 1aa7718，MixEngine 完整管线：逐包解压到暂存目录 → Gson 深度合并 JSON → ParallelZipWriter（4 worker）重压 → SHA-1 |
 | 驱动 | tools/bench/rpm/：RpmHarness.java（只调 MixEngine，SILENT 日志）、build.ps1（编译 + 取 gson）、bench.py（两臂分段采样：先直拷 3 轮，再 RPM 3 轮） |
-| 机器 | Ryzen 7 9700X / Windows 11 / Zulu 25 -Xmx4G / rps-pack release（LTO + strip） |
+| 机器 | 单机暖缓存 / Zulu 25 -Xmx4G / rps-pack release（LTO + strip） |
 | 夹具 | w1 / w2 由 tools/bench/gen_tiers.py 生成，many20k 由 gen_many20k.py 生成，s7 由 gen_overlap.py 生成（40 源、去重后 5,063 条、182 条冲突）；三份生成器都在仓内，固定种子与 zip 时间戳。w1 / w2 / many20k 可逐字节复现；s7 的纹理随机源与本节实测那次不同，只保证规模与条目数一致 |
 | 取样 | 每档 3 轮取中位；峰值工作集 3 ms 采样 |
 | 顺序 | 两臂分段：先连跑 3 轮直拷，再连跑 3 轮 RPM。交替跑会被 RPM 留下的数百 MB 脏页污染——W1 直拷从 147 ms 涨到 281 ms，那是测量误差而不是真实差距。跨档仍残留少量污染（下一档直拷首轮偏慢），取中位吸收 |

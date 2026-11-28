@@ -52,4 +52,4 @@ python 用 PATH 里的即可；RPM 侧默认用 Zulu 25 的 java.exe，换机器
   不是产物等价。夹具固定了种子与 zip 时间戳：w1 / w2 / many20k 可逐字节复现，s7 由
 gen_overlap.py 生成（规模与条目数可复现），但它的纹理随机源与第 9 节实测那次不同，SHA-1 不会相同。
 - 仅 Windows 可跑（峰值采样走 psapi，classpath 用分号分隔）。
-- 数字来自单机暖缓存：Ryzen 7 9700X / Windows 11 / Zulu 25 / -Xmx4G。
+- 数字来自单机暖缓存：Zulu 25 / -Xmx4G；绝对耗时随机器变化，倍数用同机对照才有意义。
