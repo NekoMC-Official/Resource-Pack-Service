@@ -178,7 +178,7 @@ engine.rs   BTreeMap<String, Blob{ bytes, crc, sha1: OnceLock, layer, source, pr
 | **P2-1** | 需合并条目并行化（rayon 或方案 A 分片） | 仅在「大量 lang 合并」场景有效 | 1–2 天 | 中 |
 | **P2-2** | HTTP Range / 合并器常驻进程 / mimalloc | 体感与边角 | 1 天 | 低 |
 
-做完 P0 后的对外口径可以改成：**「合并 270 MB 资源包约 0.3 s，内存 20 MB 级；重复构建近乎零成本」**——这已经明显优于 RoseResourcepack（单线程重打包 + 手动触发），并在合并吞吐上优于 ResourcePackManager 的 4 线程写入器（它的并行优势被「不重压缩」直接绕过；2026-11-28 的一对一实测见 docs/perf-benchmark.md §9：RPM 完整管线 W1 3.0 s vs 147 ms、W2 15.1 s vs 108 ms）。
+做完 P0 后的对外口径可以改成：**「合并 270 MB 资源包约 0.3 s，内存 20 MB 级；重复构建近乎零成本」**——这已经明显优于 RoseResourcepack（单线程重打包 + 手动触发），并在合并吞吐上优于 ResourcePackManager 的 4 线程写入器（它的并行优势被「不重压缩」直接绕过；2026-11-28 的一对一实测：RPM 完整管线 W1 3.0 s vs 147 ms、W2 15.1 s vs 108 ms）。
 
 ---
 

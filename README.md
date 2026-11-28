@@ -79,8 +79,8 @@ Minecraft 只接受一个服务端资源包。多个插件各发各的时，客�
 ## 性能（实测）
 
 同一输入、同一台机器上的暖缓存对比（Rust release 构建，夹具由仓库内脚本固定种子生成）；
-两臂产物 sha1 一致，即字节等价，只比快慢与内存。方法与逐轮范围见
-[docs/perf-benchmark.md](docs/perf-benchmark.md) 的 §9 竞品对照。
+两臂产物 sha1 一致，即字节等价，只比快慢与内存。复现方式见
+[tools/bench/README.md](tools/bench/README.md) 与 [tools/bench/rpm/README.md](tools/bench/rpm/README.md)。
 
 | 档 | 条目 | ResourcePackManager 2.4.14 | 本插件 | 倍数 | 峰值内存（RPM → 本插件） |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -564,7 +564,6 @@ packs/                    社区资源包
 - [docs/design.md](docs/design.md)：架构、契约、合并语义、里程碑与风险
 - [docs/integration.md](docs/integration.md)：四种接入方式与冲突处理
 - [docs/ci.md](docs/ci.md)：CI、发布、部署与社区资源包流水线
-- [docs/perf-benchmark.md](docs/perf-benchmark.md)：性能基线与竞品对照
 - [packs/README.md](packs/README.md)：社区资源包规范
 - [CONTRIBUTING.md](CONTRIBUTING.md)：DCO、分支、测试与评审
 

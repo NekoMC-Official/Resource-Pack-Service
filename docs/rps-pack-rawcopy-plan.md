@@ -83,7 +83,7 @@ PackPublisher.kt:193     Hashing.sha1Hex(created) 又读一遍整包（JVM 侧�
 
 ### 2.3 数据来源
 
-- W1/W2 定义与旧/新数字：`docs/perf-benchmark.md` §3；原型：`docs/optimization-research.md` §3.3。
+- W1/W2 定义与旧/新数字：`docs/rps-pack-maxperf-plan.md` §2 与 §23；原型：`docs/optimization-research.md` §3.3。
 - 分阶段收益归因：解压 ~0.55 s、压缩 ~3.4 s、写盘+哈希 ~0.15 s（W1 4.07 s 的分解）。
 
 ---
@@ -368,7 +368,7 @@ W2：40×128 KB + 5,063×96 B ≈ **5.6 MB**（原型 55 MB 的大头是 40×1 M
 
 ### S7 清理与文档（0.3 人日）
 
-- 更新 `docs/design.md` 合并章节（两阶段流程 + 内存上界）、`docs/optimization-research.md` 状态、`docs/perf-benchmark.md` 备注。
+- 更新 `docs/design.md` 合并章节（两阶段流程 + 内存上界）、`docs/optimization-research.md` 状态、`docs/rps-pack-maxperf-plan.md` 备注。
 - 删除 `.tmp/proto` 以外的临时产物；保留 `.tmp/bench` 供复现。
 - **验收**：文档交叉引用一致；`cargo test` 再次全绿。
 

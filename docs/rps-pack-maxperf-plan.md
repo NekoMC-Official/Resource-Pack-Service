@@ -316,7 +316,7 @@ zip crate 9.8.2 的写出路径每条目都有 HashMap 插入、头部 Vec 分�
 ## 15. 交付与提交
 
 - 每片一个 commit，均在 `feat/fabric-server-mod`（或后续 `perf/rps-pack-maxperf`）上，不 push 除非用户明确要求。
-- 文档：本计划 + `docs/perf-benchmark.md` 追加「实施后」列 + `docs/design.md` 写出路径说明。
+- 文档：本计划记录实施后数字（§23–§37），`docs/design.md` 写出路径说明。
 - 任何未达门槛的优化：删除代码，在本文档记录「试过、无收益」。
 
 ---
@@ -402,7 +402,7 @@ zip crate 9.8.2 的写出路径每条目都有 HashMap 插入、头部 Vec 分�
 
 - 硬上限：paper ≤ 2,750,000 B（+240 KB，9.6%）、fabric ≤ 2,900,000 B（+241 KB，9.1%）。超过即视为引入不该有的依赖。
 - CI 增加一步 Assert jar size：读 build/libs 下两个 jar 的字节数，超限 exit 1；与现有 Assert bundled merger 并列。
-- 每完成一个切片，把两个 jar 的体积记进 docs/perf-benchmark.md 的表格；单次改动增长 >50 KB 必须在 commit message 说明理由。
+- 每完成一个切片，把两个 jar 的体积记进本计划的验证小节（§33、§35、§38 等）；单次改动增长 >50 KB 必须在 commit message 说明理由。
 - 体积按「压缩后」算（jar 本身是 zip），所以代码行数增长的影响远小于依赖增长：新增 2,000 行 Rust 约 +30–60 KB，新增一个大依赖可能 +400 KB。
 
 ### 18.3 取舍表
@@ -585,7 +585,7 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 
 | 步 | 内容 | 产出 / 验收 |
 | --- | --- | --- |
-| S0 | 把 .tmp 里的基准脚本收进仓库（tools/bench 或 rust/rps-pack/bench），生成 W1 / W2 / Tiny 三档数据；记录时间与峰值 RSS 基线；CI 加 jar 体积断言（§18.2） | 一条命令复现基线；CI 有 size 守门；基线写入 perf-benchmark 表 |
+| S0 | 把 .tmp 里的基准脚本收进仓库（tools/bench 或 rust/rps-pack/bench），生成 W1 / W2 / Tiny 三档数据；记录时间与峰值 RSS 基线；CI 加 jar 体积断言（§18.2） | 一条命令复现基线；CI 有 size 守门；基线写入本计划 |
 
 ### 阶段 1：内核重写（3 天，P1）
 
@@ -618,7 +618,7 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 | --- | --- | --- |
 | S11 | JVM 对接：复用 Rust 返回的 sha1（去掉第二次全文件读）、新配置项、/rps status 展示压缩率与 fanout、reload 语义 | 端到端一次构建 + 推送通过；JVM 堆增量 ≤64 MB |
 | S12 | （可选）平台 I/O：Windows / Linux / macOS 裸 FFI，feature 默认关 | 与通用路径相比提升 ≥10% 才保留，否则删除（已评估，未采用，见 §34） |
-| S13 | 全量基准与文档：W1 / W2 / Tiny / 40 万条 / 1 GB 五档复测，更新 perf-benchmark、optimization-research、README | 五档数字齐全；jar 体积在 §18 上限内；回归 >20% 不允许发布 |
+| S13 | 全量基准与文档：W1 / W2 / Tiny / 40 万条 / 1 GB 五档复测，更新本计划、optimization-research、README | 五档数字齐全；jar 体积在 §18 上限内；回归 >20% 不允许发布 |
 | S14 | 哈希与写重叠：独立哈希线程 + 小块环形缓冲（顺序不变，SHA-1 仍覆盖每个字节）；已完成，见 §35 | W1 从约 235 ms 降到 ≤160 ms，字节与 SHA-1 不变；失败可退回同步哈希 |
 
 ### 依赖与顺序
@@ -1234,7 +1234,7 @@ Rust 52 项（lib 7 + merge 26 + mcmeta 2 + writer 9 + serve 1 + scan 7）。新
 
 ### 39.5 收口
 
-至此加码清单的每一项都有结论：S10b（§36）、体积比（§37）、大条目直拷（§38）已交付；源索引 LRU、≥4 GiB zip64、mmap 源三项在本节按「不做」收口；非临时写仍按 §34.5 descoped。§22 的 S6/S8 两行已同步标注。§2 与 §5/§7/§11/§16 里仍保留 mmap、索引缓存这些当初的设计手段与待办勾选框，未落地部分以本节为准（§7:414 已改「不用」，§16 P3/P4 已标 descoped）。竞品的一对一实测见 docs/perf-benchmark.md §9：同一台机器上 ResourcePackManager 2.4.14 的完整管线 W1 3.0 s、W2 15.1 s、19.6k 条目 25.3 s，本仓分别是 147 / 108 / 67 ms（20.6× / 141× / 380×）。
+至此加码清单的每一项都有结论：S10b（§36）、体积比（§37）、大条目直拷（§38）已交付；源索引 LRU、≥4 GiB zip64、mmap 源三项在本节按「不做」收口；非临时写仍按 §34.5 descoped。§22 的 S6/S8 两行已同步标注。§2 与 §5/§7/§11/§16 里仍保留 mmap、索引缓存这些当初的设计手段与待办勾选框，未落地部分以本节为准（§7:414 已改「不用」，§16 P3/P4 已标 descoped）。竞品的一对一实测：同一台机器上 ResourcePackManager 2.4.14 的完整管线 W1 3.0 s、W2 15.1 s、19.6k 条目 25.3 s，本仓分别是 147 / 108 / 67 ms（20.6× / 141× / 380×）。
 
 
 ## 40. 全面审查（2026-11-28，18 提交）

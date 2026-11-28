@@ -1,6 +1,6 @@
 # 合并器基准
 
-复现 `docs/perf-benchmark.md` 与 `docs/rps-pack-maxperf-plan.md` 的数字。
+复现 `docs/rps-pack-maxperf-plan.md` 里的数字。
 
 ## 工作负载
 
