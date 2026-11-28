@@ -85,7 +85,7 @@ Minecraft 只接受一个服务端资源包。多个插件各发各的时，客�
 
 同一输入、同一台机器上的暖缓存对比（Rust release 构建，夹具由仓库内脚本固定种子生成）；
 两臂产物 sha1 一致，即字节等价，只比快慢与内存。复现方式见
-[tools/bench/README.md](tools/bench/README.md) 与 [tools/bench/rpm/README.md](tools/bench/rpm/README.md)。
+[tools/bench/README.md](tools/bench/README.md)；竞品一侧只用其公开发行版做一次性本地对照，对照脚手架不随仓库分发。
 
 | 档 | 条目 | ResourcePackManager 2.4.14 | 本插件 | 倍数 | 峰值内存（RPM → 本插件） |
 | --- | ---: | ---: | ---: | ---: | ---: |
