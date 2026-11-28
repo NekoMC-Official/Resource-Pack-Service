@@ -4,15 +4,18 @@
 //! - 写本地头之前必须已经知道 crc 与压缩后大小，所以 deflate 结果先落到内存
 //!   （只有需要重压的条目才走这条路径，上限受 MAX_ENTRY_BYTES 约束）。
 //! - 每个写出的字节都是最终字节，因此可以边写边算 SHA-1，省掉「写完再整包读一遍」
-//!   的第二趟 I/O；时间戳固定 1980-01-01 00:00:00，权限固定 0644，不写注释与扩展字段，
-//!   同样输入必然得到同样字节。
+//!   的第二趟 I/O。SHA-1 默认交给独立线程：1 MiB 块写满即交，更新摘要与写出重叠；
+//!   设 RPS_SYNC_HASH=1 可退回同线程计算（排障用）。时间戳固定 1980-01-01 00:00:00，
+//!   权限固定 0644，不写注释与扩展字段，同样输入必然得到同样字节。
 //!
 //! 暂不支持单条目 >= 4 GiB（需要本地 zip64 头，S6 再补）；条目数超过 65535 或目录
 //! 偏移超过 4 GiB 时自动写 zip64 EOCD。
 
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::thread::JoinHandle;
 
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
@@ -36,6 +39,11 @@ const VERSION_ZIP64: u16 = 45;
 const COPY_BUFFER: usize = 1 << 20;
 /// 输出缓冲：流式写大包时减少系统调用。
 const OUTPUT_BUFFER: usize = 1 << 20;
+/// 哈希线程的搬运块：写满一块交出去，与下一块的写出重叠。
+const HASH_BLOCK: usize = 1 << 20;
+/// 待哈希队列深度与可回收块数，决定额外内存上限（约 (QUEUE+BLOCKS+1) MiB）。
+const HASH_QUEUE: usize = 4;
+const HASH_BLOCKS: usize = 6;
 
 struct Entry {
     name: Vec<u8>,
@@ -67,7 +75,7 @@ pub struct WriteStats {
 pub struct ZipArchiveWriter {
     inner: BufWriter<File>,
     entries: Vec<Entry>,
-    hasher: Sha1,
+    hash: HashSink,
     pos: u64,
     level: u32,
     scratch: Vec<u8>,
@@ -91,13 +99,20 @@ impl ZipArchiveWriter {
         let file = File::create(path).map_err(|error| {
             MergeError::new(format!("创建输出文件失败 {}: {error}", path.display()))
         })?;
+        let hash = HashSink::new()?;
+        // 直拷的临时缓冲只服务同线程哈希；线程模式下字节直接读进哈希块。
+        let scratch = if hash.is_threaded() {
+            Vec::new()
+        } else {
+            vec![0u8; COPY_BUFFER]
+        };
         Ok(Self {
             inner: BufWriter::with_capacity(OUTPUT_BUFFER, file),
             entries: Vec::new(),
-            hasher: Sha1::new(),
+            hash,
             pos: 0,
             level,
-            scratch: vec![0u8; COPY_BUFFER],
+            scratch,
             header: Vec::with_capacity(256),
             central: Vec::with_capacity(1 << 20),
             recompressed: 0,
@@ -183,26 +198,52 @@ impl ZipArchiveWriter {
             flags,
             VERSION_DEFAULT,
         );
-        emit(&mut self.inner, &mut self.hasher, &self.header)
+        emit(&mut self.inner, &mut self.hash, &self.header)
             .map_err(|error| MergeError::new(format!("写入条目 {name} 失败: {error}")))?;
         self.pos += self.header.len() as u64;
 
         let data_start = self.pos;
         let mut remaining = compressed;
-        while remaining > 0 {
-            let want = remaining.min(COPY_BUFFER as u64) as usize;
-            let read = data
-                .read(&mut self.scratch[..want])
-                .map_err(|error| MergeError::new(format!("读取条目 {name} 的数据失败: {error}")))?;
-            if read == 0 {
-                return Err(MergeError::new(format!(
-                    "条目 {name} 压缩数据不完整：还差 {remaining} 字节"
-                )));
+        if self.hash.is_threaded() {
+            // 直接读进哈希块：写出与哈希共用同一份字节，不再多一次拷贝。
+            while remaining > 0 {
+                let want = remaining.min(COPY_BUFFER as u64) as usize;
+                let spare = self
+                    .hash
+                    .spare()
+                    .ok_or_else(|| MergeError::new("哈希缓冲不可用"))?;
+                let want = want.min(spare.len());
+                let read = data.read(&mut spare[..want]).map_err(|error| {
+                    MergeError::new(format!("读取条目 {name} 的数据失败: {error}"))
+                })?;
+                if read == 0 {
+                    return Err(MergeError::new(format!(
+                        "条目 {name} 压缩数据不完整：还差 {remaining} 字节"
+                    )));
+                }
+                self.inner
+                    .write_all(&spare[..read])
+                    .map_err(|error| MergeError::new(format!("拷贝条目 {name} 失败: {error}")))?;
+                self.pos += read as u64;
+                remaining -= read as u64;
+                self.hash.advance(read)?;
             }
-            emit(&mut self.inner, &mut self.hasher, &self.scratch[..read])
-                .map_err(|error| MergeError::new(format!("拷贝条目 {name} 失败: {error}")))?;
-            self.pos += read as u64;
-            remaining -= read as u64;
+        } else {
+            while remaining > 0 {
+                let want = remaining.min(COPY_BUFFER as u64) as usize;
+                let read = data.read(&mut self.scratch[..want]).map_err(|error| {
+                    MergeError::new(format!("读取条目 {name} 的数据失败: {error}"))
+                })?;
+                if read == 0 {
+                    return Err(MergeError::new(format!(
+                        "条目 {name} 压缩数据不完整：还差 {remaining} 字节"
+                    )));
+                }
+                emit(&mut self.inner, &mut self.hash, &self.scratch[..read])
+                    .map_err(|error| MergeError::new(format!("拷贝条目 {name} 失败: {error}")))?;
+                self.pos += read as u64;
+                remaining -= read as u64;
+            }
         }
         self.pos = data_start + compressed;
         self.raw_copied += 1;
@@ -279,10 +320,10 @@ impl ZipArchiveWriter {
         self.inner
             .flush()
             .map_err(|error| MergeError::new(format!("刷新输出失败: {error}")))?;
-        let digest = self.hasher.finalize();
+        let sha1 = self.hash.finish()?;
         Ok(WriteStats {
             bytes: self.pos,
-            sha1: hex(&digest),
+            sha1,
             recompressed: self.recompressed,
             stored: self.stored,
             raw_copied: self.raw_copied,
@@ -323,11 +364,11 @@ impl ZipArchiveWriter {
             flags,
             VERSION_DEFAULT,
         );
-        emit(&mut self.inner, &mut self.hasher, &self.header)
+        emit(&mut self.inner, &mut self.hash, &self.header)
             .map_err(|error| MergeError::new(format!("写入条目 {name} 失败: {error}")))?;
         self.pos += self.header.len() as u64;
         if !payload.is_empty() {
-            emit(&mut self.inner, &mut self.hasher, payload)
+            emit(&mut self.inner, &mut self.hash, payload)
                 .map_err(|error| MergeError::new(format!("写入条目 {name} 失败: {error}")))?;
         }
         self.pos += compressed;
@@ -345,7 +386,7 @@ impl ZipArchiveWriter {
     }
 
     fn emit(&mut self, bytes: &[u8]) -> Result<()> {
-        emit(&mut self.inner, &mut self.hasher, bytes)
+        emit(&mut self.inner, &mut self.hash, bytes)
             .map_err(|error| MergeError::new(format!("写入输出失败: {error}")))?;
         self.pos += bytes.len() as u64;
         Ok(())
@@ -383,10 +424,165 @@ fn deflate(data: &[u8], level: u32, name: &str) -> Result<Vec<u8>> {
     Ok(compressed)
 }
 
-fn emit<W: Write>(inner: &mut W, hasher: &mut Sha1, data: &[u8]) -> io::Result<()> {
-    inner.write_all(data)?;
-    hasher.update(data);
-    Ok(())
+fn emit<W: Write>(inner: &mut W, hash: &mut HashSink, data: &[u8]) -> Result<()> {
+    inner
+        .write_all(data)
+        .map_err(|error| MergeError::new(format!("写入输出失败: {error}")))?;
+    hash.update(data)
+}
+
+/// SHA-1 的计算位置：默认独立线程（写一块交一块），RPS_SYNC_HASH=1 时退回当前线程。
+enum HashSink {
+    Inline(Sha1),
+    Threaded(ThreadedHash),
+}
+
+impl HashSink {
+    fn new() -> Result<Self> {
+        let sync = std::env::var("RPS_SYNC_HASH")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(false);
+        if sync {
+            return Ok(Self::Inline(Sha1::new()));
+        }
+        // 线程起不来不值得让整次合成失败：退回同线程，字节与摘要完全一致。
+        match ThreadedHash::start() {
+            Ok(threaded) => Ok(Self::Threaded(threaded)),
+            Err(error) => {
+                eprintln!("rps-pack: 哈希线程不可用（{error}），退回同线程计算");
+                Ok(Self::Inline(Sha1::new()))
+            }
+        }
+    }
+
+    fn is_threaded(&self) -> bool {
+        matches!(self, Self::Threaded(_))
+    }
+
+    /// 当前块里尚未填满的尾部；内联模式没有块，返回 None。
+    fn spare(&mut self) -> Option<&mut [u8]> {
+        match self {
+            Self::Threaded(threaded) => Some(threaded.spare()),
+            Self::Inline(_) => None,
+        }
+    }
+
+    fn advance(&mut self, count: usize) -> Result<()> {
+        match self {
+            Self::Threaded(threaded) => threaded.advance(count),
+            Self::Inline(_) => Ok(()),
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            Self::Inline(hasher) => {
+                hasher.update(data);
+                Ok(())
+            }
+            Self::Threaded(threaded) => threaded.push(data),
+        }
+    }
+
+    fn finish(self) -> Result<String> {
+        match self {
+            Self::Inline(hasher) => Ok(hex(&hasher.finalize().to_vec())),
+            Self::Threaded(threaded) => threaded.finish(),
+        }
+    }
+}
+
+struct ThreadedHash {
+    sender: Option<SyncSender<(Vec<u8>, usize)>>,
+    recycle: Receiver<Vec<u8>>,
+    handle: Option<JoinHandle<Vec<u8>>>,
+    block: Vec<u8>,
+    filled: usize,
+}
+
+impl ThreadedHash {
+    fn start() -> Result<Self> {
+        let (sender, receiver) = sync_channel::<(Vec<u8>, usize)>(HASH_QUEUE);
+        let (returned, recycle) = sync_channel::<Vec<u8>>(HASH_BLOCKS);
+        let handle = std::thread::Builder::new()
+            .name("rps-pack-hash".into())
+            .spawn(move || {
+                let mut hasher = Sha1::new();
+                while let Ok((buffer, filled)) = receiver.recv() {
+                    hasher.update(&buffer[..filled]);
+                    let _ = returned.try_send(buffer);
+                }
+                hasher.finalize().to_vec()
+            })
+            .map_err(|error| MergeError::new(format!("启动哈希线程失败: {error}")))?;
+        Ok(Self {
+            sender: Some(sender),
+            recycle,
+            handle: Some(handle),
+            block: vec![0u8; HASH_BLOCK],
+            filled: 0,
+        })
+    }
+
+    fn spare(&mut self) -> &mut [u8] {
+        &mut self.block[self.filled..]
+    }
+
+    fn advance(&mut self, count: usize) -> Result<()> {
+        self.filled += count;
+        if self.filled == self.block.len() {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn push(&mut self, data: &[u8]) -> Result<()> {
+        let mut rest = data;
+        while !rest.is_empty() {
+            let take = rest.len().min(self.spare().len());
+            self.spare()[..take].copy_from_slice(&rest[..take]);
+            rest = &rest[take..];
+            self.advance(take)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if self.filled == 0 {
+            return Ok(());
+        }
+        let buffer = std::mem::replace(&mut self.block, Vec::new());
+        let filled = self.filled;
+        self.filled = 0;
+        let Some(sender) = self.sender.as_ref() else {
+            self.block = vec![0u8; HASH_BLOCK];
+            return Err(MergeError::new("哈希线程已结束"));
+        };
+        if sender.send((buffer, filled)).is_err() {
+            // 复位块，避免调用方吞掉这一次错误后 advance 在空块上空转。
+            self.block = vec![0u8; HASH_BLOCK];
+            return Err(MergeError::new("哈希线程提前退出，无法继续计算 SHA-1"));
+        }
+        // 回收块的长度一直是 HASH_BLOCK（只读不缩），直接复用，不再清零重写。
+        self.block = match self.recycle.try_recv() {
+            Ok(buffer) => buffer,
+            Err(_) => vec![0u8; HASH_BLOCK],
+        };
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<String> {
+        self.flush()?;
+        drop(self.sender.take());
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| MergeError::new("哈希线程已结束"))?;
+        let digest = handle
+            .join()
+            .map_err(|_| MergeError::new("哈希线程异常退出"))?;
+        Ok(hex(&digest))
+    }
 }
 
 fn local_header(
@@ -494,4 +690,60 @@ fn push_u32(buffer: &mut Vec<u8>, value: u32) {
 
 fn push_u64(buffer: &mut Vec<u8>, value: u64) {
     buffer.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(len: usize) -> Vec<u8> {
+        (0..len).map(|index| (index % 251) as u8).collect()
+    }
+
+    /// 线程路径用例的显式开关判断：对照运行（RPS_SYNC_HASH）时打印跳过原因，
+    /// 而不是静默通过一个什么都没测的用例。
+    fn assert_threaded(sink: &HashSink) -> bool {
+        if sink.is_threaded() {
+            return true;
+        }
+        eprintln!("RPS_SYNC_HASH 已设置，跳过线程路径用例");
+        false
+    }
+
+    fn digest(data: &[u8]) -> String {
+        let mut hasher = Sha1::new();
+        hasher.update(data);
+        hex(&hasher.finalize().to_vec())
+    }
+
+    #[test]
+    fn threaded_hash_matches_inline_across_block_boundaries() {
+        let data = payload(HASH_BLOCK * 2 + 12_345);
+        let mut sink = HashSink::new().expect("启动哈希");
+        if !assert_threaded(&sink) {
+            return;
+        }
+        for chunk in data.chunks(700_000) {
+            sink.update(chunk).expect("更新摘要");
+        }
+        assert_eq!(sink.finish().expect("收尾"), digest(&data));
+    }
+
+    #[test]
+    fn threaded_hash_advance_matches_after_zero_copy_fill() {
+        let data = payload(HASH_BLOCK + 4_096);
+        let mut sink = HashSink::new().expect("启动哈希");
+        if !assert_threaded(&sink) {
+            return;
+        }
+        let mut written = 0;
+        while written < data.len() {
+            let spare = sink.spare().expect("哈希块");
+            let take = (data.len() - written).min(spare.len());
+            spare[..take].copy_from_slice(&data[written..written + take]);
+            written += take;
+            sink.advance(take).expect("交付块");
+        }
+        assert_eq!(sink.finish().expect("收尾"), digest(&data));
+    }
 }

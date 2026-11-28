@@ -159,6 +159,37 @@ fn finish_reports_real_sha1_and_size() {
     assert_eq!(stats.bytes, bytes.len() as u64);
 }
 
+/// 单个大条目跨多个哈希块时，报告摘要仍与磁盘文件一致。
+#[test]
+fn large_entry_crosses_hash_blocks_and_keeps_sha1() {
+    let dir = work("writer-hash-blocks");
+    let path = dir.join("out.zip");
+    let payload: Vec<u8> = (0..(3 * 1024 * 1024 + 7))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let mut writer = ZipArchiveWriter::create(&path, 6).expect("创建写入器");
+    writer
+        .add_stored("assets/demo/large.bin", &payload)
+        .expect("写大条目");
+    let stats = writer.finish().expect("收尾");
+
+    let bytes = std::fs::read(&path).expect("读取产物");
+    let mut hasher = Sha1::new();
+    hasher.update(&bytes);
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(stats.sha1, actual);
+
+    let mut archive = ZipArchive::new(File::open(&path).expect("打开产物")).expect("解析产物");
+    let mut entry = archive.by_index(0).expect("读条目");
+    let mut read = Vec::new();
+    entry.read_to_end(&mut read).expect("读内容");
+    assert_eq!(read, payload);
+}
+
 /// 直拷路径（add_raw）同样参与整包 SHA-1，且内容可原样读回。
 #[test]
 fn add_raw_participates_in_sha1_and_round_trips() {
@@ -214,6 +245,76 @@ fn add_raw_participates_in_sha1_and_round_trips() {
     let mut read = Vec::new();
     entry.read_to_end(&mut read).expect("读内容");
     assert_eq!(read, b"raw content from source");
+}
+
+/// 直拷大条目跨 1 MiB 哈希块的每个边界（块前一字节、整块、块后一字节、三块）。
+#[test]
+fn raw_copies_cross_hash_blocks_at_exact_boundaries() {
+    let dir = work("writer-raw-blocks");
+    let source = dir.join("source.zip");
+    let sizes = [1_048_575usize, 1_048_576, 1_048_577, 3 * 1_048_576];
+    let mut payloads = Vec::new();
+    {
+        let mut zip = ZipWriter::new(File::create(&source).expect("建来源"));
+        let options =
+            zip::write::SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (index, size) in sizes.iter().enumerate() {
+            let payload: Vec<u8> = (0..*size)
+                .map(|offset| ((offset + index) % 251) as u8)
+                .collect();
+            zip.start_file(format!("assets/raw/{index}.bin"), options)
+                .expect("写来源条目");
+            zip.write_all(&payload).expect("写内容");
+            payloads.push(payload);
+        }
+        zip.finish().expect("收尾来源");
+    }
+
+    let path = dir.join("out.zip");
+    let mut writer = ZipArchiveWriter::create(&path, 6).expect("创建写入器");
+    {
+        let mut archive =
+            ZipArchive::new(File::open(&source).expect("打开来源")).expect("解析来源");
+        for index in 0..sizes.len() {
+            let (name, crc, compressed, size, offset) = {
+                let entry = archive.by_index(index).expect("来源条目");
+                (
+                    entry.name().expect("名称").to_string(),
+                    entry.crc32(),
+                    entry.compressed_size(),
+                    entry.size(),
+                    entry.data_start().expect("数据偏移"),
+                )
+            };
+            let mut data = File::open(&source).expect("打开来源");
+            data.seek(SeekFrom::Start(offset)).expect("定位数据");
+            writer
+                .add_raw(&name, crc, compressed, size, 0, &mut data)
+                .expect("直拷条目");
+        }
+    }
+    let stats = writer.finish().expect("收尾");
+    assert_eq!(stats.raw_copied, sizes.len());
+
+    let bytes = std::fs::read(&path).expect("读取产物");
+    let mut hasher = Sha1::new();
+    hasher.update(&bytes);
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(stats.sha1, actual);
+    assert_eq!(stats.bytes, bytes.len() as u64);
+
+    let mut archive = ZipArchive::new(File::open(&path).expect("打开产物")).expect("解析产物");
+    for (index, payload) in payloads.iter().enumerate() {
+        let mut entry = archive.by_index(index).expect("产物条目");
+        let mut read = Vec::new();
+        entry.read_to_end(&mut read).expect("读内容");
+        assert_eq!(read.len(), payload.len(), "第 {index} 条长度");
+        assert_eq!(&read, payload, "第 {index} 条内容");
+    }
 }
 
 #[test]

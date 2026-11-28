@@ -619,7 +619,7 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 | S11 | JVM 对接：复用 Rust 返回的 sha1（去掉第二次全文件读）、新配置项、/rps status 展示压缩率与 fanout、reload 语义 | 端到端一次构建 + 推送通过；JVM 堆增量 ≤64 MB |
 | S12 | （可选）平台 I/O：Windows / Linux / macOS 裸 FFI，feature 默认关 | 与通用路径相比提升 ≥10% 才保留，否则删除（已评估，未采用，见 §34） |
 | S13 | 全量基准与文档：W1 / W2 / Tiny / 40 万条 / 1 GB 五档复测，更新 perf-benchmark、optimization-research、README | 五档数字齐全；jar 体积在 §18 上限内；回归 >20% 不允许发布 |
-| S14 | 哈希与写重叠：独立哈希线程 + 小块环形缓冲（顺序不变，SHA-1 仍覆盖每个字节） | W1 从约 235 ms 降到 ≤160 ms，颜色/大小不变；失败可退回同步哈希 |
+| S14 | 哈希与写重叠：独立哈希线程 + 小块环形缓冲（顺序不变，SHA-1 仍覆盖每个字节）；已完成，见 §35 | W1 从约 235 ms 降到 ≤160 ms，字节与 SHA-1 不变；失败可退回同步哈希 |
 
 ### 依赖与顺序
 
@@ -627,7 +627,7 @@ S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11 → S
 
 ### 总量
 
-主线约 **8.5 天**（S0 0.5 + S1–S4 3 + S5–S7 2 + S8 1 + S10 1 + S11–S13 1.5，含缓冲）；加 S9 约再 1 天；S12 已评估、未采用（只花评估时间，不排实施）；S14 待排。第一片 S1 是风险最高的一步（字节级确定性与 zip64），也是后面所有优化的地基。
+主线约 **8.5 天**（S0 0.5 + S1–S4 3 + S5–S7 2 + S8 1 + S10 1 + S11–S13 1.5，含缓冲）；加 S9 约再 1 天；S12 已评估、未采用（只花评估时间，不排实施）；S14 已完成（§35）。第一片 S1 是风险最高的一步（字节级确定性与 zip64），也是后面所有优化的地基。
 
 ### 每步的停止条件
 
@@ -1082,4 +1082,40 @@ S12 原计划给每个平台加专有 I/O 原语（Windows `FILE_FLAG_SEQUENTIAL
 
 - `verify_sources` 打开时，每个直拷条目会**多解压一遍做 CRC 校验**；写出本身仍是压缩字节直拷（`writer.add_raw` 内没有解码器），用于怀疑来源被改动的排障场景，默认关闭。
 - 条目上限 500k（约 175 MB 元数据）；超过会直接报错而不是 OOM。
-- 输出仍是单线程顺序写 + 单趟 SHA-1（S14 之前）；并行 deflate 只在「需要重新压缩的条目」上有意义，当前收益不足以抵消复杂度和体积（见 §17、§18）。
+- 输出仍是单线程顺序写；SHA-1 自 S14 起在独立线程与写出重叠（见 §35）；并行 deflate 只在「需要重新压缩的条目」上有意义，当前收益不足以抵消复杂度和体积（见 §17、§18）。
+
+## 35. S14：哈希与写重叠（2026-11-28）
+
+§34.4 的关哈希对照把 W1 的约 100 ms 定位在 `writer.rs` 的 `emit`：`write_all` 之后紧接着 `hasher.update`，两段串行。本轮把 SHA-1 挪到独立线程，写出与摘要并行，字节与顺序不变。
+
+### 35.1 实现
+
+- `HashSink` 两种形态：`Threaded`（默认）与 `Inline`（`RPS_SYNC_HASH=1`，对照/排障）。
+- 线程 `rps-pack-hash` 用 `sync_channel` 收 `(块, 已填长度)`，`hasher.update` 后把块还回回收通道；`HASH_BLOCK = 1 MiB`、`HASH_QUEUE = 4`、`HASH_BLOCKS = 6`；峰值是「在途 1 + 队列 4 + 哈希线程持有 1 + 回收池 6」共 12 个 1 MiB 块，额外内存上限约 12 MiB。线程模式下不再分配直拷用的 `scratch`。
+- 直拷路径零拷贝：`add_raw` 直接把来源字节读进哈希块尾部（`spare()`），`write_all` 写同一片字节后 `advance()`，块满即交；头、中央目录、重压条目走 `push()`（拷进块）。
+- 提交顺序 = 单写者顺序，哈希线程单消费者按同序 `update`，摘要与逐字节同步计算一致；`finish()` 先冲掉尾块再 join。
+- 线程起不来时退回同线程（字节与摘要不变）；线程中途退出则报「哈希线程提前退出，无法继续计算 SHA-1」。
+
+### 35.2 结果（`tools/bench/run_tiers.py`，release，5 轮、每轮每档 3 次取中位，同机）
+
+| 档 | 墙钟中位 | 内部 | 峰值 RSS | 对比 S13 |
+| --- | --- | --- | --- | --- |
+| W1（270 MB / 469 条） | 138.4–159.7 ms | 122–142 ms | 12.2–13.3 MB | 234.5 ms → 约 −35% |
+| W2（40 源 / 12,161 条） | 87.7–97.1 ms | 70–78 ms | 25.5–27.8 MB | 116.3 ms → 约 −20% |
+| many-400k | 896.9–1379.2 ms | 876–1360 ms | 158.1–158.2 MB | 与 S13 同量级；方差受后台负载影响大 |
+| micro / small | 15.9–20.0 / 17.7–20.0 ms | 1–2 ms | 2.4–6.4 MB | 不变（进程启动主导） |
+
+三个产物的 SHA-1 与 S13 完全一致（W1 `cc8476da…`、W2 `e46c8f53…`、many `d9bf6ff1…`）；`RPS_SYNC_HASH=1` 跑 W1 得到同一 SHA-1、内部 206 ms，证明两种模式逐字节等价。峰值 RSS 比 S13 高约 3–4 MB（哈希块池；`scratch` 在线程模式下已不再分配），仍在 §18 预算内。many 档受后台负载影响最大，单轮中位在 900 ms 到 1.4 s 之间波动，判断只看 W1/W2 这类大字节量档。
+
+测量命令：`RPS_PACK_BIN=rust/rps-pack/target/release/rps-pack.exe python tools/bench/run_tiers.py .tmp/bench-s13`；机器为 Ryzen 7 9700X / Windows 11 / Rust 1.100 release。夹具由 `tools/bench/gen_tiers.py` 固定种子生成、约 328 MB（在 `.tmp` 下、不入仓），这些数字不可由 CI 复现；换机比较请用同机同夹具的前后两版。
+
+### 35.3 测试
+
+Rust 52 项（lib 7 + merge 26 + mcmeta 2 + writer 9 + serve 1 + scan 7）。新增：`threaded_hash_matches_inline_across_block_boundaries`（跨块摘要等于同步哈希）、`threaded_hash_advance_matches_after_zero_copy_fill`（零拷贝填充路径）、`large_entry_crosses_hash_blocks_and_keeps_sha1`（3 MiB 单条目回读，报告 SHA-1 等于磁盘文件）、`raw_copies_cross_hash_blocks_at_exact_boundaries`（直拷 1 MiB−1 / 1 MiB / 1 MiB+1 / 3 MiB 四种长度，覆盖块前一字节、整块、块后一字节与多块，断言报告 SHA-1 等于磁盘文件且四条内容逐字节回读一致）。
+
+### 35.4 边界
+
+- 写出仍是单线程顺序（zip 是流式格式），并行只发生在「写」与「算哈希」之间。
+- `many` 档由 40 万条元数据主导，收益在噪声内；S14 只针对大字节量。
+- 多 1 个线程、约 12 MiB 缓冲；micro / small 实测无回归。
+- `RPS_SYNC_HASH` 是排障开关，不是配置项。
