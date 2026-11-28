@@ -1,5 +1,3 @@
-<div align="center">
-
 # Resource Pack Service
 
 > 把多个插件各自产出的资源包，合成一份，再由本插件统一下发。
