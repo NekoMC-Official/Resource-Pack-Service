@@ -1,3 +1,5 @@
+<div align="center">
+
 # Resource Pack Service
 
 > 把多个插件各自产出的资源包，合成一份，再由本插件统一下发。
@@ -12,6 +14,8 @@
 [![Fabric](https://img.shields.io/badge/Fabric-26.3-dbd0b4)](https://fabricmc.net/)
 [![Java](https://img.shields.io/badge/Java-25-orange)](https://adoptium.net/)
 [![Rust](https://img.shields.io/badge/Rust-2024-b7410e)](https://www.rust-lang.org/)
+
+</div>
 
 Minecraft 只接受一个服务端资源包。多个插件各发各的时，客户端只保留最后到达的那个，
 先到的材质整包消失。本服务把「谁有什么」和「怎么发」拆开：插件只登记自己产出的 zip，
