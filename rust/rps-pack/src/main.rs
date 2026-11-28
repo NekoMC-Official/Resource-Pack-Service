@@ -57,8 +57,7 @@ fn run_merge(args: &[String]) {
                 Ok(line) => line,
                 Err(error) => fail(&format!("报告序列化失败: {error}")),
             };
-            println!("{line}");
-            let _ = std::io::stdout().flush();
+            emit(&line, true);
             eprintln!(
                 "rps-pack: {} 个条目，{} 字节，sha1 {}，用时 {}ms",
                 report.entries, report.bytes, report.sha1, report.millis
@@ -67,8 +66,7 @@ fn run_merge(args: &[String]) {
         Err(error) => {
             eprintln!("rps-pack: {error}");
             let payload = serde_json::json!({ "ok": false, "error": error.to_string() });
-            println!("{payload}");
-            let _ = std::io::stdout().flush();
+            emit(&payload.to_string(), false);
             std::process::exit(2);
         }
     }
@@ -84,9 +82,26 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn fail(message: &str) -> ! {
     eprintln!("rps-pack: {message}");
     let payload = serde_json::json!({ "ok": false, "error": message });
-    println!("{payload}");
-    let _ = std::io::stdout().flush();
+    emit(&payload.to_string(), false);
     std::process::exit(2);
+}
+
+/// 把一行 JSON 写到 stdout。读取方提前关闭管道（例如接到 head）不算错误：
+/// Rust 默认忽略 SIGPIPE，写失败会返回 EPIPE，直接用 println! 会 panic 并打出噪音。
+/// 成功报告退 0、错误报告仍退 2，管道关掉不会把失败伪装成成功。
+fn emit(text: &str, success: bool) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+    match writeln!(stdout, "{text}").and_then(|_| stdout.flush()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            std::process::exit(if success { 0 } else { 2 })
+        }
+        Err(error) => {
+            eprintln!("rps-pack: 写入报告失败: {error}");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// 常驻模式：stdin/stdout 上以 u32 小端长度前缀收发 JSON 帧，空闲超时或 stdin 关闭即退出。

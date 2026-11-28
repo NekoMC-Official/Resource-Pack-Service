@@ -1288,4 +1288,6 @@ Rust 52 项（lib 7 + merge 26 + mcmeta 2 + writer 9 + serve 1 + scan 7）。新
 
 - Rust：56 项（lib 7 + mcmeta 2 + merge 27 + scan 9 + serve 1 + writer 10），新增 check_unchanged_detects_replaced_source、stored_crc_mismatch_is_rejected。
 - JVM：core 21 个套件 / 115 项（4 项需 RPS_PACK_BIN），paper 2 / 7；全量构建 BUILD SUCCESSFUL。
-- jar 守卫：Paper 2,635,331 B ≤ 2,750,000；Fabric 2,783,000 B ≤ 2,900,000。新增 failedRetryDoesNotDisplaceQueuedGeneration，并把两处「迟到回执释放槽位」的断言改为「不清槽位、只计 dropped」。
+- jar 守卫：Paper 2,636,003 B ≤ 2,750,000；Fabric 2,783,672 B ≤ 2,900,000。新增 failedRetryDoesNotDisplaceQueuedGeneration，并把两处「迟到回执释放槽位」的断言改为「不清槽位、只计 dropped」。
+
+另外，rps-pack 的 JSON 报告改由 emit() 写出：读取方提前关闭管道（例如接到 head）时不再因 EPIPE 触发 panic：成功报告退 0，错误报告仍退 2，管道关掉不会把失败伪装成成功。

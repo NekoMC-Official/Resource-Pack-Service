@@ -35,6 +35,8 @@ python tools/bench/rpm/bench.py --rounds 3 `
   --json .tmp/rpm-bench/result.json
 ```
 
+python 用 PATH 里的即可；RPM 侧默认用 Zulu 25 的 java.exe，换机器时用 --java 指定（JDK 17+）。
+
 每档先连跑 3 轮 rps-pack、再连跑 3 轮 RPM。交替跑会让 RPM 解压暂存留下的数百 MB 脏页
 把直拷计时抬高近一倍（W1 147 → 281 ms），那是测量污染而不是真实差距；跨档之间仍有少量
 残留（下一档首轮偏慢），中位数会吸收它。采样 PeakWorkingSetSize（3 ms 间隔），输出墙钟、
@@ -47,6 +49,7 @@ python tools/bench/rpm/bench.py --rounds 3 `
   writeCollisionLog=false，RPM 少写一份冲突日志，对竞品略有利。
 - rps-pack 侧走中央目录扫描与原始字节直拷，只有冲突 JSON 会被重写。
 - 两臂产物字节不相等（容器布局、是否重压、JSON 合并顺序都不同），比较的是**同输入的耗时与内存**，
-  不是产物等价。夹具固定了种子与 zip 时间戳，同一档位重复跑 SHA-1 稳定。
+  不是产物等价。夹具固定了种子与 zip 时间戳：w1 / w2 / many20k 可逐字节复现，s7 由
+gen_overlap.py 生成（规模与条目数可复现），但它的纹理随机源与第 9 节实测那次不同，SHA-1 不会相同。
 - 仅 Windows 可跑（峰值采样走 psapi，classpath 用分号分隔）。
 - 数字来自单机暖缓存：Ryzen 7 9700X / Windows 11 / Zulu 25 / -Xmx4G。
