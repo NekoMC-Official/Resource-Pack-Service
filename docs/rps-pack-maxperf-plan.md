@@ -1125,19 +1125,24 @@ Rust 52 项（lib 7 + merge 26 + mcmeta 2 + writer 9 + serve 1 + scan 7）。新
 ### 36.1 实现
 
 - `PackHttpServer` 新增 6 参构造（`maxConcurrent`、`egressBytesPerSecond`），原 4 参保留并委托（64 / 不限）。
-- 并发窗口：`Semaphore` 公平锁，`tryAcquire(100 ms)` 失败直接 `503` + `Retry-After: 1`；槽位覆盖整个响应体，`finally` 释放；304/404/405 不占槽。
-- 全局限速：令牌桶按字节计数（容量 = max(速率, 64 KiB)），固定 64 KiB 分片 `transferTo` 前取令牌；等待按 50 ms 步长让出，`InterruptedException` 立即返回。
-- 配置：`delivery.http.max-concurrent`（默认 64，1–4096）、`delivery.http.egress-kbps`（默认 0 = 不限，0–10,000,000）；Paper `startDelivery` 与 Fabric `FabricPlatform` 都从 `RpsConfig` 取值。
-- `force` 语义收口：`PackPublisher` 与 `/rps push` 全体路径改为传空 SHA-1 入队，跳过「已加载同版本」过滤；单人 `/rps push <玩家>` 仍直连。
+- 并发窗口：`Semaphore` 公平锁，槽位与线程池都按 `min(max-concurrent, 256)` 建；`tryAcquire(100 ms)` 失败直接 `503` + `Retry-After: 1`；槽位覆盖整个响应体，`finally` 释放；304/404/405 不占槽。
+- 全局限速：按字节预约发送时刻，锁内只推进 `nextFreeNanos`，锁外 `TimeUnit.NANOSECONDS.sleep`，不把 HTTP 线程串成一条；实际少发（客户端提前断开）时 `refund` 退回额度。
+- ETag 按「路径 + 大小 + 修改时间」缓存，命中时不再回读整包算 SHA-1。
+- 配置：`delivery.http.max-concurrent`（默认 64，1–256）、`delivery.http.egress-kbps`（默认 0 = 不限，0–10,000,000）；Paper `startDelivery` 与 Fabric `FabricPlatform` 都从 `RpsConfig` 取值。
+- 限速开启时推送在途超时从 120 s 放宽到 1 小时，避免慢速下载被当成失败回收槽位。
+- `force` 语义收口：`PackPublisher` 与 `/rps push` 全体路径带真实 SHA-1 + `force = true` 入队，跳过「已加载同版本」过滤但仍记录摘要，迟到的旧代回执只释放槽位、不消耗重试。
 
 ### 36.2 测试
 
 - `PackHttpServerTest.servesWhenEgressLimitIsEnabled`：限速开启仍能完整下载。
-- `PackHttpServerTest.answers503WhenConcurrentSlotsAreExhausted`：8 MiB 文件 + 单槽 + 慢读客户端占住槽位，第二个请求得到 503 与 `Retry-After: 1`。
-- `FanoutControllerLifecycleTest.unconditionalPushIgnoresLoadedState`：普通推送跳过已加载玩家，空 SHA-1 强制重推。
+- `PackHttpServerTest.egressLimitPacesTheBody`：96 KiB 走 128 KB/s，断言耗时 ≥ 400 ms。
+- `PackHttpServerTest.answers503WhenConcurrentSlotsAreExhausted`：8 MiB 文件 + 单槽 + 慢读客户端占住槽位，第二个请求得到 503 与 `Retry-After: 1`；断开后同一出口恢复 200。
+- `PackHttpServerTest.etagFollowsThePublishedFile`：旧 ETag 不能换来 304，正文换成新包的内容。
+- `FanoutControllerLifecycleTest.unconditionalPushIgnoresLoadedState`：普通推送跳过已加载玩家；`force` 带真实摘要重推并让下发器看到 `force`；旧代回执只释放槽位。
 
 ### 36.3 边界
 
-- 限速是进程级总出口上限，不区分玩家/地址；令牌桶容量固定 64 KiB，短连接可能先拿到一拍突发。
+- 限速是进程级总出口上限，不区分玩家/地址，也没有缓冲：预约按字节线性排队，适合「总带宽封顶」而不是精细 QoS。
 - 503 只在没有空闲槽位时出现，客户端会按下载失败处理并计入一次重试；调大窗口或降低并发下载数可避免。
-- 槽位等待 100 ms 是硬编码，不随配置变化。
+- 槽位等待 100 ms 是硬编码，不随配置变化；线程池固定按窗口上限建，最多 256 条。
+- ETag 缓存以大小 + 修改时间为准；同一毫秒内等长改写理论上会命中旧摘要（发布路径总换文件，实际不会遇到）。

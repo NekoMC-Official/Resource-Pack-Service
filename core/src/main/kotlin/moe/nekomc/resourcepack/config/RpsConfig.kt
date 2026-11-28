@@ -258,7 +258,7 @@ class RpsConfig private constructor(
                 httpPortNumber = config.getInt("delivery.http.port", 25580).coerceIn(0, 65535),
                 httpUrlPath = config.getString("delivery.http.path", "/pack/merged.zip") ?: "/pack/merged.zip",
                 httpPublicUrl = (config.getString("delivery.http.public-url", "") ?: "").trim(),
-                httpMaxConcurrent = config.getInt("delivery.http.max-concurrent", 64).coerceIn(1, 4096),
+                httpMaxConcurrent = config.getInt("delivery.http.max-concurrent", 64).coerceIn(1, 256),
                 httpEgressKbps = config.getInt("delivery.http.egress-kbps", 0).coerceIn(0, 10_000_000),
             fanoutMaxConcurrent = config.getInt("delivery.fanout.max-concurrent", 64).coerceIn(1, 1024),
             fanoutJitterMs = config.getInt("delivery.fanout.jitter-ms", 1500).coerceIn(0, 10_000),

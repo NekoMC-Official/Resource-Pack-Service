@@ -180,10 +180,17 @@ class FanoutControllerLifecycleTest {
         assertEquals(0, delivery.pushed.size(), "普通推送跳过已加载同一版本的玩家");
         assertEquals(1L, controller.stats().getDropped());
 
-        controller.enqueue(List.of(player), "", true, clock.get());
+        controller.enqueue(List.of(player), "sha", true, clock.get(), true);
         scheduler.tick();
-        assertEquals(1, delivery.pushed.size(), "空 sha1 表示无条件重推");
+        assertEquals(1, delivery.pushed.size(), "强制推送跳过已加载判断");
+        assertEquals("sha", delivery.sentSha1, "强制推送仍记录真实摘要");
+        assertTrue(delivery.sentForce, "下发器应看到 force");
         assertEquals(1, controller.stats().getInflight());
+
+        // 迟到的旧代回执只释放槽位，不能算作这一代的完成。
+        controller.onStatus(player, PackStatus.LOADED, "older", clock.get());
+        assertEquals(0L, controller.stats().getCompleted(), "旧代回执不应算完成");
+        assertEquals(0, controller.stats().getInflight(), "旧代回执仍要释放槽位");
         controller.close();
     }
 
@@ -214,6 +221,8 @@ class FanoutControllerLifecycleTest {
         final List<UUID> pushed = new ArrayList<>();
         final Map<UUID, String> loaded = new HashMap<>();
         int accepted = 1;
+        String sentSha1 = "";
+        boolean sentForce;
 
         @Override
         public int push(UUID player, boolean force) {
@@ -226,6 +235,8 @@ class FanoutControllerLifecycleTest {
                 return 0;
             }
             pushed.add(player);
+            sentSha1 = sha1;
+            sentForce = force;
             return accepted;
         }
 

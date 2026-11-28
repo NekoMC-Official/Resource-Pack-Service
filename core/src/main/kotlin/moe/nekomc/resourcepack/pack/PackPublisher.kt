@@ -118,6 +118,8 @@ class PackPublisher(private val plugin: PackHost) {
         synchronized(this) {
             fanoutRef.get()?.let { return it }
             val config = plugin.config()
+            // 限速时一个包可能要下几十分钟，超时放宽到 1 小时，免得限速被当成下载失败。
+            val pendingTimeout = if (config.deliveryHttpEgressKbps() > 0) 3_600_000L else 120_000L
             val created = FanoutController(
                 delivery,
                 plugin.scheduler(),
@@ -126,6 +128,7 @@ class PackPublisher(private val plugin: PackHost) {
                 config.deliveryFanoutJitterMs(),
                 config.deliveryFanoutRetry(),
                 config.deliveryFanoutRamp(),
+                pendingTimeoutMs = pendingTimeout,
             )
             fanoutRef.set(created)
             return created
@@ -305,7 +308,7 @@ class PackPublisher(private val plugin: PackHost) {
                 val controller = fanout()
                 if (controller != null) {
                     // force 不看客户端已加载状态，空 sha1 表示无条件重推
-                    controller.enqueue(targets, "", false)
+                    controller.enqueue(targets, result.sha1(), false, force = true)
                     plugin.logger().info("按 force 排队重推 " + targets.size + " 名玩家")
                 } else {
                     var pushed = 0

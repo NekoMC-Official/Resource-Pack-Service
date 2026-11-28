@@ -48,12 +48,14 @@ class FanoutController @JvmOverloads constructor(
         val attempts: Int,
         val readyAt: Long,
         val seq: Long,
+        val force: Boolean,
     )
 
     private class Inflight(
         val sha1: String,
         val at: Long,
         val attempts: Int,
+        val force: Boolean,
     )
 
     private val lock = Any()
@@ -85,11 +87,18 @@ class FanoutController @JvmOverloads constructor(
     /**
      * 把一批玩家排进队列。
      *
-     * @param sha1 目标摘要；空串表示忽略「已加载」过滤（force 重推）
+     * @param sha1 目标摘要；回执会拿它判断是否属于同一代，force 为真时仍保留这个摘要
      * @param join 是否进服推送：进服任务优先级更高，并额外加 0..jitterMs 抖动
+     * @param force 强制重推：跳过「已加载同一摘要」过滤，但仍记录摘要以便识别迟到回执
      */
     @JvmOverloads
-    fun enqueue(players: Collection<UUID>, sha1: String, join: Boolean, now: Long = clock()) {
+    fun enqueue(
+        players: Collection<UUID>,
+        sha1: String,
+        join: Boolean,
+        now: Long = clock(),
+        force: Boolean = false,
+    ) {
         if (players.isEmpty()) {
             return
         }
@@ -105,7 +114,7 @@ class FanoutController @JvmOverloads constructor(
                     dropped++
                     continue
                 }
-                if (target.isNotEmpty() && delivery.loadedSha1(player) == target) {
+                if (!force && target.isNotEmpty() && delivery.loadedSha1(player) == target) {
                     dropped++
                     continue
                 }
@@ -114,7 +123,7 @@ class FanoutController @JvmOverloads constructor(
                     continue
                 }
                 val readyAt = if (join) now + ThreadLocalRandom.current().nextLong(jitterMs + 1L) else now
-                val task = Task(player, target, 0, readyAt, seq++)
+                val task = Task(player, target, 0, readyAt, seq++, force)
                 if (join) {
                     joinQueue.add(task)
                 } else {
@@ -154,7 +163,7 @@ class FanoutController @JvmOverloads constructor(
                     val retrySha1 = sha1.ifBlank { current.sha1 }
                     if (current.attempts < retryLimit && !closed && pending.add(player)) {
                         retried++
-                        broadcastQueue.add(Task(player, retrySha1, current.attempts + 1, now + retryDelayMs, seq++))
+                        broadcastQueue.add(Task(player, retrySha1, current.attempts + 1, now + retryDelayMs, seq++, current.force))
                     } else {
                         failed++
                     }
@@ -221,7 +230,7 @@ class FanoutController @JvmOverloads constructor(
                         dropped++
                         continue
                     }
-                    inflight[head.player] = Inflight(head.sha1, now, head.attempts)
+                    inflight[head.player] = Inflight(head.sha1, now, head.attempts, head.force)
                     due.add(head)
                 }
                 pushed += due.size

@@ -20,6 +20,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Logger;
 
 /**
  * 只提供固定一个文件的 HTTP 出口（JDK 内置 HttpServer）。
@@ -30,7 +31,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class PackHttpServer implements AutoCloseable {
 
     private static final String THREAD_PREFIX = "rps-http-";
+    private static final Logger LOGGER = Logger.getLogger("rps-http");
     private static final int DEFAULT_MAX_CONCURRENT = 64;
+    // 每个在途下载占一个线程；上限压住配置误填，避免一次开出几千个线程。
+    private static final int MAX_SLOTS = 256;
+    private static final int MAX_POOL_THREADS = 512;
+    private static final int MIN_POOL_THREADS = 8;
     private static final int TRANSFER_CHUNK = 64 * 1024;
     private static final long SLOT_WAIT_MILLIS = 100L;
 
@@ -38,13 +44,16 @@ public final class PackHttpServer implements AutoCloseable {
     private final String bind;
     private final int configuredPort;
     private final String urlPath;
+    private final int threads;
     private final Semaphore slots;
     private final TokenBucket egress;
 
     private volatile HttpServer server;
     private volatile ExecutorService executor;
     private volatile int actualPort = -1;
-    private volatile String etag = "";
+    private volatile String etagKey = "";
+    private volatile String etagValue = "";
+    private volatile String publishedSha1 = "";
     private volatile String lastUrl = "";
 
     public PackHttpServer(Path zipFile, String bind, int port, String urlPath) {
@@ -63,7 +72,10 @@ public final class PackHttpServer implements AutoCloseable {
         this.configuredPort = port;
         String path = urlPath == null || urlPath.isBlank() ? "/pack/merged.zip" : urlPath.trim();
         this.urlPath = path.startsWith("/") ? path : "/" + path;
-        this.slots = new Semaphore(Math.max(1, maxConcurrent), true);
+        int window = Math.max(1, Math.min(maxConcurrent, MAX_SLOTS));
+        this.slots = new Semaphore(window, true);
+        // 线程要比槽位多几条，否则槽位占满时没人能接住新连接、也就发不出 503。
+        this.threads = Math.min(MAX_POOL_THREADS, Math.max(MIN_POOL_THREADS, window + MIN_POOL_THREADS));
         this.egress = new TokenBucket(egressBytesPerSecond);
     }
 
@@ -81,7 +93,7 @@ public final class PackHttpServer implements AutoCloseable {
             thread.setDaemon(true);
             return thread;
         };
-        ExecutorService pool = Executors.newFixedThreadPool(8, factory);
+        ExecutorService pool = Executors.newFixedThreadPool(threads, factory);
         HttpServer created = null;
         try {
             created = HttpServer.create(new InetSocketAddress(bind, configuredPort), 0);
@@ -124,11 +136,7 @@ public final class PackHttpServer implements AutoCloseable {
                 exchange.sendResponseHeaders(404, -1);
                 return;
             }
-            String current = etag;
-            if (current.isEmpty()) {
-                current = Sha1Hex.quote(sha1Of(file));
-                etag = current;
-            }
+            String current = etagFor(file);
             exchange.getResponseHeaders().set("ETag", current);
             exchange.getResponseHeaders().set("Cache-Control", "no-cache");
             exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
@@ -158,12 +166,15 @@ public final class PackHttpServer implements AutoCloseable {
                         WritableByteChannel target = Channels.newChannel(out);
                         long position = 0;
                         while (position < size) {
-                            long want = Math.min(TRANSFER_CHUNK, size - position);
-                            egress.acquire((int) want);
+                            int want = (int) Math.min((long) TRANSFER_CHUNK, size - position);
+                            egress.acquire(want);
                             long moved = channel.transferTo(position, want, target);
                             if (moved <= 0) {
+                                egress.refund(want);
+                                LOGGER.warning("客户端提前关闭，剩余 " + (size - position) + " 字节未发送");
                                 break;
                             }
+                            egress.refund(want - (int) moved);
                             position += moved;
                         }
                     }
@@ -183,50 +194,66 @@ public final class PackHttpServer implements AutoCloseable {
         }
     }
 
-    /** 全局限速：令牌桶按字节计，0 表示不限；等待按 50 ms 步长让出，关服时能尽快退出。 */
+    /** 全局限速：按字节预约发送时刻，锁内只记账、锁外睡，避免把所有 HTTP 线程串成一条。 */
     private static final class TokenBucket {
 
         private final double bytesPerSecond;
-        private final double capacity;
-        private double tokens;
-        private long lastNanos = System.nanoTime();
+        private long nextFreeNanos = System.nanoTime();
 
         TokenBucket(long bytesPerSecond) {
             this.bytesPerSecond = Math.max(0L, bytesPerSecond);
-            this.capacity = Math.max(this.bytesPerSecond, TRANSFER_CHUNK);
-            this.tokens = this.capacity;
         }
 
         void acquire(int bytes) {
             if (bytesPerSecond <= 0 || bytes <= 0) {
                 return;
             }
+            long waitNanos;
             synchronized (this) {
-                while (true) {
-                    refill();
-                    if (tokens >= bytes) {
-                        tokens -= bytes;
-                        return;
-                    }
-                    long waitMillis = (long) Math.ceil((bytes - tokens) / bytesPerSecond * 1000.0);
-                    try {
-                        Thread.sleep(Math.max(1L, Math.min(waitMillis, 50L)));
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
+                long now = System.nanoTime();
+                if (nextFreeNanos < now) {
+                    nextFreeNanos = now;
                 }
+                waitNanos = nextFreeNanos - now;
+                nextFreeNanos += (long) Math.ceil(bytes / bytesPerSecond * 1_000_000_000.0);
+            }
+            sleep(waitNanos);
+        }
+
+        /** 实际只传出更少字节时退回额度，避免一个早断的连接让后面的人白等。 */
+        void refund(int bytes) {
+            if (bytesPerSecond <= 0 || bytes <= 0) {
+                return;
+            }
+            synchronized (this) {
+                long now = System.nanoTime();
+                nextFreeNanos = Math.max(now, nextFreeNanos - (long) Math.ceil(bytes / bytesPerSecond * 1_000_000_000.0));
             }
         }
 
-        private void refill() {
-            long now = System.nanoTime();
-            double elapsed = (now - lastNanos) / 1_000_000_000.0;
-            lastNanos = now;
-            if (elapsed > 0) {
-                tokens = Math.min(capacity, tokens + elapsed * bytesPerSecond);
+        private static void sleep(long waitNanos) {
+            if (waitNanos <= 0) {
+                return;
+            }
+            try {
+                TimeUnit.NANOSECONDS.sleep(waitNanos);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /** 按大小与修改时间缓存摘要，避免每次请求都把整包回读一遍。 */
+    private String etagFor(Path file) throws IOException {
+        String key = file + "|" + Files.size(file) + "|" + Files.getLastModifiedTime(file).toMillis();
+        String cached = etagKey;
+        if (cached != null && cached.equals(key)) {
+            return etagValue;
+        }
+        String value = Sha1Hex.quote(sha1Of(file));
+        etagKey = key;
+        etagValue = value;
+        return value;
     }
 
     private static String sha1Of(Path file) {
@@ -252,7 +279,10 @@ public final class PackHttpServer implements AutoCloseable {
     /** 发布新版本时更新 ETag；url 只用于状态显示。 */
     public void publish(String url, String sha1) {
         this.lastUrl = url == null ? "" : url;
-        this.etag = Sha1Hex.quote(sha1);
+        // 摘要还会给状态页看；ETag 交给 etagFor 按文件实际内容算。
+        this.publishedSha1 = sha1 == null ? "" : sha1;
+        this.etagKey = "";
+        this.etagValue = "";
     }
 
     /** 实际监听的端口；未启动时为 -1。 */
@@ -271,6 +301,11 @@ public final class PackHttpServer implements AutoCloseable {
     }
 
     /** 最近一次发布的下载地址，仅用于状态显示。 */
+    /** 最近一次发布的摘要；状态页用来对照。 */
+    public String sha1() {
+        return publishedSha1;
+    }
+
     public String lastUrl() {
         return lastUrl;
     }

@@ -201,8 +201,8 @@ community:
 | `delivery.http.port` | `25580` | 监听端口；`0` 表示随机端口（启动日志会打印实际值） |
 | `delivery.http.path` | `/pack/merged.zip` | 固定下载路径 |
 | `delivery.http.public-url` | 空 | 完整公网地址；填了优先使用 |
-| `delivery.http.max-concurrent` | `64` | 同时在途的下载上限，1–4096；占满时新请求直接 503 + `Retry-After: 1` |
-| `delivery.http.egress-kbps` | `0` | 出口全局限速（KB/s），0–10000000；0 表示不限 |
+| `delivery.http.max-concurrent` | `64` | 同时在途的下载上限，1–256；占满时新请求直接 503 + `Retry-After: 1` |
+| `delivery.http.egress-kbps` | `0` | 出口全局限速（KB/s），0–10000000；0 表示不限，开启后在途超时放宽到 1 小时 |
 | `watch.enabled` | `true` | 是否轮询来源文件 |
 | `watch.interval-seconds` | `60` | 轮询间隔，最小 5 |
 | `push.mode` | `notify` | 内容变化后：`none` 只落盘 / `notify` 提示玩家 / `force` 强制重推 |

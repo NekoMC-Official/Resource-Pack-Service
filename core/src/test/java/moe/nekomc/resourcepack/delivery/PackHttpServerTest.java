@@ -51,13 +51,25 @@ class PackHttpServerTest {
         }
     }
 
+    private static String sha1Hex(byte[] data) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-1").digest(data);
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte value : digest) {
+                hex.append(String.format(java.util.Locale.ROOT, "%02x", value));
+            }
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
     @Test
     void servesZipWithEtag() throws Exception {
         HttpResponse<byte[]> response = client.send(HttpRequest.newBuilder(URI.create(url)).GET().build(),
                 HttpResponse.BodyHandlers.ofByteArray());
         assertEquals(200, response.statusCode());
         assertArrayEquals(BODY, response.body());
-        assertEquals("\"" + SHA1 + "\"", response.headers().firstValue("ETag").orElse(""));
+        assertEquals("\"" + sha1Hex(BODY) + "\"", response.headers().firstValue("ETag").orElse(""));
         assertEquals("application/zip", response.headers().firstValue("Content-Type").orElse(""));
         assertEquals("no-cache", response.headers().firstValue("Cache-Control").orElse(""));
         assertEquals("nosniff", response.headers().firstValue("X-Content-Type-Options").orElse(""));
@@ -67,7 +79,7 @@ class PackHttpServerTest {
     @Test
     void answers304OnMatchingEtag() throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .header("If-None-Match", "\"" + SHA1 + "\"")
+                .header("If-None-Match", "\"" + sha1Hex(BODY) + "\"")
                 .GET()
                 .build();
         HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
@@ -124,6 +136,43 @@ class PackHttpServerTest {
     }
 
     @Test
+    void egressLimitPacesTheBody() throws Exception {
+        Path zip = tempDir.resolve("paced.zip");
+        byte[] payload = new byte[96 * 1024];
+        new java.util.Random(11).nextBytes(payload);
+        Files.write(zip, payload);
+        PackHttpServer limited = new PackHttpServer(zip, "127.0.0.1", 0, "/pack/merged.zip", 2, 128L * 1024);
+        limited.start();
+        try {
+            long started = System.nanoTime();
+            HttpResponse<byte[]> response = client.send(HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:" + limited.port() + "/pack/merged.zip")).GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000L;
+            assertEquals(200, response.statusCode());
+            assertArrayEquals(payload, response.body());
+            // 96 KiB 走 128 KB/s 至少 700 ms；留足余量只校验「确实被限速」。
+            assertTrue(elapsedMillis >= 400L, "限速后传输应明显变慢，实际 " + elapsedMillis + "ms");
+        } finally {
+            limited.close();
+        }
+    }
+
+    @Test
+    void etagFollowsThePublishedFile() throws Exception {
+        String first = client.send(HttpRequest.newBuilder(URI.create(url)).method("HEAD",
+                HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray())
+                .headers().firstValue("ETag").orElse("");
+        assertEquals("\"" + sha1Hex(BODY) + "\"", first);
+        byte[] replacement = "新包".getBytes(StandardCharsets.UTF_8);
+        Files.write(tempDir.resolve("merged.zip"), replacement);
+        HttpResponse<byte[]> stale = client.send(HttpRequest.newBuilder(URI.create(url))
+                .header("If-None-Match", first).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, stale.statusCode(), "文件换了就不能再回 304");
+        assertArrayEquals(replacement, stale.body());
+    }
+
+    @Test
     void answers503WhenConcurrentSlotsAreExhausted() throws Exception {
         Path big = tempDir.resolve("big.zip");
         byte[] payload = new byte[8 * 1024 * 1024];
@@ -147,8 +196,20 @@ class PackHttpServerTest {
                     HttpResponse.BodyHandlers.ofByteArray());
             assertEquals(503, rejected.statusCode());
             assertEquals("1", rejected.headers().firstValue("Retry-After").orElse(""));
-        } finally {
-            limited.close();
         }
+        // 客户端断开后槽位必须回收，否则一次超时就能把出口永久堵死。
+        long deadline = System.currentTimeMillis() + 5000L;
+        HttpResponse<byte[]> recovered = null;
+        while (System.currentTimeMillis() < deadline) {
+            recovered = client.send(HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:" + limited.port() + "/pack/merged.zip")).GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            if (recovered.statusCode() == 200) {
+                break;
+            }
+            Thread.sleep(50L);
+        }
+        assertEquals(200, recovered == null ? 0 : recovered.statusCode(), "断开后槽位应释放");
+        limited.close();
     }
 }
