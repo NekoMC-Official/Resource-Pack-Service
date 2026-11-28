@@ -32,7 +32,7 @@ class ConflictReportTest {
                 dir.resolve("merged.zip"), "deadbeef", 120L, 4, 0, 46, 46, 46,
                 List.of(), List.of(texture, lang),
                 new MergeResult.ConflictSummary(2, 1, 1, 0, Map.of("texture", 1, "lang", 1), false),
-                List.of(), 3, 8L);
+                List.of(), 1000L, 3, 8L);
         PackSnapshot snapshot = new PackSnapshot(
                 "http://127.0.0.1:8080/pack.zip", "deadbeef", 3, 120L,
                 "2026-01-01 00:00:00", "ok", "");
@@ -48,6 +48,7 @@ class ConflictReportTest {
         assertEquals("texture", report.getConflicts().get(0).getKind());
         assertEquals(List.of(0), report.getConflicts().get(0).getLoserPriorities());
         assertTrue(result.summary().contains("直拷 3"), "摘要应显示直拷条目数");
+        assertTrue(result.summary().contains("体积 12%"), "摘要应显示相对原始体积的比例");
         assertEquals(1, ConflictReport.visible(report, false).size());
         assertEquals(2, ConflictReport.visible(report, true).size());
         assertTrue(ConflictReport.visible(report, false).stream()
@@ -73,7 +74,7 @@ class ConflictReportTest {
                 dir.resolve("merged.zip"), "deadbeef", 120L, 1, 0, 64, 64, 64,
                 List.of(), List.of(conflict),
                 new MergeResult.ConflictSummary(1, 1, 0, 0, Map.of("texture", 1), false),
-                List.of(), 0, 1L);
+                List.of(), 0L, 0, 1L);
         PackSnapshot snapshot = new PackSnapshot(
                 "http://127.0.0.1:8080/pack.zip", "deadbeef", 1, 120L,
                 "2026-01-01 00:00:00", "ok", "");
@@ -96,7 +97,7 @@ class ConflictReportTest {
         MergeResult result = new MergeResult(
                 dir.resolve("merged.zip"), "deadbeef", 120L, 1, 0, 64, 64, 64,
                 List.of(), java.util.Collections.nCopies(5001, conflict),
-                null, List.of(), 0, 1L);
+                null, List.of(), 0L, 0, 1L);
         PackSnapshot snapshot = new PackSnapshot(
                 "http://127.0.0.1:8080/pack.zip", "deadbeef", 1, 120L,
                 "2026-01-01 00:00:00", "ok", "");

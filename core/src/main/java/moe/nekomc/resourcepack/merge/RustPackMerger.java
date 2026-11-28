@@ -211,6 +211,7 @@ public final class RustPackMerger implements Merger {
                 conflicts,
                 conflictSummary,
                 warnings,
+                json.has("rawBytes") ? json.get("rawBytes").getAsLong() : 0L,
                 integer(json, "rawCopied", 0),
                 millis);
     }

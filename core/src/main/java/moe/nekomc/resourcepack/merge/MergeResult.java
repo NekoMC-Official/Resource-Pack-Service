@@ -18,7 +18,8 @@ public record MergeResult(
         List<Conflict> conflicts,
         ConflictSummary conflictSummary,
         List<String> warnings,
-        int rawCopied,
+        long rawBytes,
+    int rawCopied,
         long millis) {
 
     public record Layer(String id, int priority, int format, int entries) {
@@ -72,6 +73,7 @@ public record MergeResult(
         return "条目 " + entries + " / 去重 " + deduped + " / 冲突 " + total
                 + "（高 " + high + "）"
                 + " / 直拷 " + rawCopied
+                + (rawBytes > 0 ? "（原始 " + rawBytes + " 字节，体积 " + Math.round(bytes * 100.0 / rawBytes) + "%）" : "")
                 + " / 格式 " + format + "（" + formatMin + "-" + formatMax + "）"
                 + " / " + bytes + " 字节 / " + millis + "ms";
     }
