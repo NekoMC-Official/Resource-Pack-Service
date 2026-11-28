@@ -208,6 +208,11 @@ impl ZipArchiveWriter {
         self.pos += self.header.len() as u64;
 
         let data_start = self.pos;
+        let mut stored_crc = if method == 0 {
+            Some(crc32fast::Hasher::new())
+        } else {
+            None
+        };
         let mut remaining = compressed;
         if self.hash.is_threaded() {
             // 直接读进哈希块：写出与哈希共用同一份字节，不再多一次拷贝。
@@ -225,6 +230,9 @@ impl ZipArchiveWriter {
                     return Err(MergeError::new(format!(
                         "条目 {name} 压缩数据不完整：还差 {remaining} 字节"
                     )));
+                }
+                if let Some(hasher) = stored_crc.as_mut() {
+                    hasher.update(&spare[..read]);
                 }
                 self.inner
                     .write_all(&spare[..read])
@@ -244,6 +252,9 @@ impl ZipArchiveWriter {
                         "条目 {name} 压缩数据不完整：还差 {remaining} 字节"
                     )));
                 }
+                if let Some(hasher) = stored_crc.as_mut() {
+                    hasher.update(&self.scratch[..read]);
+                }
                 emit(&mut self.inner, &mut self.hash, &self.scratch[..read])
                     .map_err(|error| MergeError::new(format!("拷贝条目 {name} 失败: {error}")))?;
                 self.pos += read as u64;
@@ -251,6 +262,14 @@ impl ZipArchiveWriter {
             }
         }
         self.pos = data_start + compressed;
+        if let Some(hasher) = stored_crc {
+            let actual = hasher.finalize();
+            if actual != crc {
+                return Err(MergeError::new(format!(
+                    "条目 {name} 的 CRC-32 不符：声明 {crc:08x}，实际 {actual:08x}"
+                )));
+            }
+        }
         self.raw_copied += 1;
         self.entries.push(Entry {
             name: name_bytes.to_vec(),

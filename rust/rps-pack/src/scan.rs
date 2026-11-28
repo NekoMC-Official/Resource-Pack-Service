@@ -70,6 +70,8 @@ pub struct SourceReader {
     raw: BufReader<File>,
     /// raw 句柄的真实偏移；由 RawSlice 在 drop 时回写，连续条目无需重复 seek。
     raw_pos: Arc<AtomicU64>,
+    /// 扫描期记录的大小与修改时间；写出前复核，避免整体替换后继续直拷旧偏移。
+    stat: Option<(u64, Option<std::time::SystemTime>)>,
 }
 
 /// 并行扫描的任务描述：每个来源一个，结果按 spec 顺序返回。
@@ -160,6 +162,9 @@ impl SourceReader {
         let raw = std::fs::File::open(path).map_err(|error| {
             MergeError::new(format!("来源 {source_id} 打开读取句柄失败: {error}"))
         })?;
+        let stat = std::fs::metadata(path)
+            .ok()
+            .map(|meta| (meta.len(), meta.modified().ok()));
         let raw = BufReader::with_capacity(RAW_BUFFER, raw);
         let mut archive = ZipArchive::new(BufReader::new(file))
             .map_err(|error| MergeError::new(format!("来源 {source_id} 不是合法 zip: {error}")))?;
@@ -211,9 +216,15 @@ impl SourceReader {
                 CompressionMethod::Deflated => Some(8),
                 _ => None,
             };
-            // Stored 条目声明的大小必须与数据长度一致，否则直拷会写出坏包，退回解压路径。
-            let stored_mismatch = matches!(method, Some(0)) && entry.compressed_size() != size;
-            let method = if stored_mismatch { None } else { method };
+        // Stored 声明的大小必须与数据长度一致；不一致时既不能直拷，也不能按 deflate 读。
+        let stored_mismatch = matches!(method, Some(0)) && entry.compressed_size() != size;
+        if stored_mismatch {
+            return err(format!(
+                "来源 {source_id} 条目 {name} 的 stored 声明不一致：压缩 {} 字节，原始 {} 字节",
+                entry.compressed_size(),
+                size
+            ));
+        }
             let offset = entry.data_start();
             let copyable = matches!(method, Some(0)) && offset.is_some();
             if copyable && size > MAX_RAW_ENTRY_BYTES {
@@ -222,11 +233,7 @@ impl SourceReader {
                 ));
             }
             if !copyable && size > MAX_ENTRY_BYTES {
-                let reason = if stored_mismatch {
-                    "（stored 声明的压缩长度与原始长度不一致，退回解压路径）"
-                } else {
-                    "；只有 stored 条目能直拷"
-                };
+        let reason = "；只有 stored 条目能直拷";
                 return err(format!(
                     "来源 {source_id} 条目 {name} 解压后 {size} 字节，超过可解压上限 {MAX_ENTRY_BYTES}{reason}"
                 ));
@@ -251,6 +258,7 @@ impl SourceReader {
             archive: Some(archive),
             raw,
             raw_pos: Arc::new(AtomicU64::new(0)),
+            stat,
         };
         if let Some(position) = reader
             .entries
@@ -304,6 +312,29 @@ impl SourceReader {
         self.archive = None;
     }
 
+    /// 扫描期间记录的文件身份是否还成立；整体替换过的来源不再继续直拷旧偏移。
+    pub fn check_unchanged(&self) -> Result<()> {
+        let Some((len, modified)) = self.stat else {
+            return Ok(());
+        };
+        let meta = std::fs::metadata(&self.path).map_err(|error| {
+            MergeError::new(format!(
+                "来源 {} 在扫描后无法读取 {}: {error}",
+                self.id,
+                self.path.display()
+            ))
+        })?;
+        if meta.len() != len || meta.modified().ok() != modified {
+            return Err(MergeError::new(format!(
+                "来源 {} 在扫描后被改动：{}（大小 {} -> {}），已放弃写出",
+                self.id,
+                self.path.display(),
+                len,
+                meta.len()
+            )));
+        }
+        Ok(())
+    }
     /// 解压一个条目到内存；只走扫描期记下的原始偏移，避免与已释放的中央目录形成两个视图。
     pub fn read(&mut self, meta: &EntryMeta) -> Result<Vec<u8>> {
         let source_id = self.id.clone();

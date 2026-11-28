@@ -198,11 +198,16 @@ public final class RustPackMerger implements Merger {
         }
         String sha1 = sha1(json, output, warnings);
         long millis = json.has("millis") ? json.get("millis").getAsLong() : (System.nanoTime() - started) / 1_000_000L;
+        if (!json.has("bytes") || !json.has("entries")) {
+            throw new MergeUnavailableException("rps-pack 报告缺少 bytes/entries");
+        }
+        long bytes = json.get("bytes").getAsLong();
+        int entries = json.get("entries").getAsInt();
         return new MergeResult(
                 output,
                 sha1,
-                json.get("bytes").getAsLong(),
-                json.get("entries").getAsInt(),
+        bytes,
+        entries,
                 json.has("deduped") ? json.get("deduped").getAsInt() : 0,
                 integer(json, "format", 0),
                 integer(json, "format_min", 0),

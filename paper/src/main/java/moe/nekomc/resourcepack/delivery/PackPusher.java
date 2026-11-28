@@ -251,7 +251,10 @@ public final class PackPusher implements Listener, AutoCloseable, PackDelivery {
     public void onStatus(PlayerResourcePackStatusEvent event) {
         Player player = event.getPlayer();
         PlayerResourcePackStatusEvent.Status status = event.getStatus();
-        String sha1 = pushedSha1.getOrDefault(player.getUniqueId(), lastSha1);
+        String reported = event.getHash();
+        String sha1 = reported == null || reported.isBlank()
+                ? pushedSha1.getOrDefault(player.getUniqueId(), lastSha1)
+                : reported;
         PackStatus mapped = switch (status) {
             case SUCCESSFULLY_LOADED -> PackStatus.LOADED;
             case DECLINED -> PackStatus.DECLINED;

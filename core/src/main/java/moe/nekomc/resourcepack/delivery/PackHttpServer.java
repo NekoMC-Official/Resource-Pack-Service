@@ -14,12 +14,16 @@ import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
 /**
@@ -39,6 +43,8 @@ public final class PackHttpServer implements AutoCloseable {
     private static final int MIN_POOL_THREADS = 8;
     private static final int TRANSFER_CHUNK = 64 * 1024;
     private static final long SLOT_WAIT_MILLIS = 100L;
+    // 线程忙时最多排这么多连接；再多说明已经过载，直接拒绝，不再无限堆任务。
+    private static final int QUEUE_CAPACITY = 512;
 
     private final Path zipFile;
     private final String bind;
@@ -47,6 +53,9 @@ public final class PackHttpServer implements AutoCloseable {
     private final int threads;
     private final Semaphore slots;
     private final TokenBucket egress;
+    private final AtomicLong rejected = new AtomicLong();
+    // 同一个文件的摘要只算一次：并发冷启动不会各自把整包读一遍。
+    private final ConcurrentHashMap<String, CompletableFuture<String>> etagComputing = new ConcurrentHashMap<>();
 
     private volatile HttpServer server;
     private volatile ExecutorService executor;
@@ -96,7 +105,17 @@ public final class PackHttpServer implements AutoCloseable {
             thread.setDaemon(true);
             return thread;
         };
-        ExecutorService pool = Executors.newFixedThreadPool(threads, factory);
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+                threads,
+                threads,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(QUEUE_CAPACITY),
+                factory,
+                (task, owner) -> {
+                    rejected.incrementAndGet();
+                    LOGGER.warning("HTTP 请求队列已满，拒绝新连接；累计 " + rejected.get() + " 次");
+                });
         HttpServer created = null;
         try {
             created = HttpServer.create(new InetSocketAddress(bind, configuredPort), 0);
@@ -140,11 +159,13 @@ public final class PackHttpServer implements AutoCloseable {
                 return;
             }
             String current = etagFor(file);
-            exchange.getResponseHeaders().set("ETag", current);
+            if (!current.isEmpty()) {
+                exchange.getResponseHeaders().set("ETag", current);
+            }
             exchange.getResponseHeaders().set("Cache-Control", "no-cache");
             exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
             String ifNoneMatch = exchange.getRequestHeaders().getFirst("If-None-Match");
-            if (ifNoneMatch != null && !ifNoneMatch.isBlank() && ifNoneMatch.contains(current)) {
+            if (ifNoneMatch != null && matchesEtag(ifNoneMatch, current)) {
                 exchange.sendResponseHeaders(304, -1);
                 return;
             }
@@ -171,7 +192,15 @@ public final class PackHttpServer implements AutoCloseable {
                         while (position < size) {
                             int want = (int) Math.min((long) TRANSFER_CHUNK, size - position);
                             egress.acquire(want);
-                            long moved = channel.transferTo(position, want, target);
+                            long moved;
+                            try {
+                                moved = channel.transferTo(position, want, target);
+                            } catch (IOException error) {
+                                // transferTo 抛错时不知道已写出多少，按整块退：最多多退一个块，
+                                // 方向偏保守（放宽限速），不会超出端口带宽。
+                                egress.refund(want);
+                                throw error;
+                            }
                             if (moved <= 0) {
                                 egress.refund(want);
                                 LOGGER.fine("客户端提前关闭，剩余 " + (size - position) + " 字节未发送");
@@ -248,14 +277,63 @@ public final class PackHttpServer implements AutoCloseable {
 
     /** 按大小与修改时间缓存摘要，避免每次请求都把整包回读一遍。 */
     private String etagFor(Path file) throws IOException {
-        String key = file + "|" + Files.size(file) + "|" + Files.getLastModifiedTime(file).toMillis();
+        String key;
+        try {
+            key = file + "|" + Files.size(file) + "|" + Files.getLastModifiedTime(file).toMillis();
+        } catch (IOException error) {
+            return "";
+        }
         EtagEntry cached = etagEntry;
         if (cached.key().equals(key)) {
             return cached.value();
         }
-        EtagEntry fresh = new EtagEntry(key, Sha1Hex.quote(sha1Of(file)));
-        etagEntry = fresh;
-        return fresh.value();
+        CompletableFuture<String> mine = new CompletableFuture<>();
+        CompletableFuture<String> running = etagComputing.putIfAbsent(key, mine);
+        if (running != null) {
+            try {
+                return running.get(30L, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return "";
+            } catch (Exception error) {
+                return "";
+            }
+        }
+        try {
+            String digest = sha1Of(file);
+            String value = digest.isEmpty() ? "" : Sha1Hex.quote(digest);
+            if (!value.isEmpty()) {
+                // 读失败时不要把空摘要写进缓存，否则这个版本会一直不发 ETag。
+                this.etagEntry = new EtagEntry(key, value);
+            }
+            mine.complete(value);
+            return value;
+        } catch (RuntimeException error) {
+            mine.completeExceptionally(error);
+            throw error;
+        } finally {
+            etagComputing.remove(key, mine);
+        }
+    }
+
+    /** 按 RFC 9110 逐个比对 If-None-Match：支持逗号分隔、W/ 前缀与通配符 *。 */
+    private static boolean matchesEtag(String header, String etag) {
+        if (etag.isEmpty()) {
+            return false;
+        }
+        for (String part : header.split(",")) {
+            String value = part.trim();
+            if (value.equals("*")) {
+                return true;
+            }
+            if (value.startsWith("W/")) {
+                value = value.substring(2).trim();
+            }
+            if (value.equals(etag)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String sha1Of(Path file) {
@@ -313,6 +391,11 @@ public final class PackHttpServer implements AutoCloseable {
 
     public boolean running() {
         return server != null;
+    }
+
+    /** 因线程池队列已满被拒绝的连接数。 */
+    public long rejectedRequests() {
+        return rejected.get();
     }
 
     @Override

@@ -42,6 +42,8 @@ class SourceWatcher(
             return
         }
         val periodMs = (intervalSeconds * 1000L).coerceAtLeast(1000L)
+        // 首次变动也要走完整的防抖窗口，避免读到正在写入的包。
+        lastFireAt = System.currentTimeMillis()
         task = host.scheduler().runAsyncTimer(periodMs, periodMs, Runnable { tick() })
     }
 

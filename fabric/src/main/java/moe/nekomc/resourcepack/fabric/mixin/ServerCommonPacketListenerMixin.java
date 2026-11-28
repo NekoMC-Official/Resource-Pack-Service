@@ -29,7 +29,7 @@ public abstract class ServerCommonPacketListenerMixin {
         if ((Object) this instanceof ServerGamePacketListenerImpl listener) {
             FabricPlatform platform = RpsFabricMod.platform();
             if (platform != null && listener.player != null) {
-                platform.onResponse(listener.player, packet.action());
+                platform.onResponse(listener.player, packet.id(), packet.action());
             }
         }
     }

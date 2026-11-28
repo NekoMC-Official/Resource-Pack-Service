@@ -591,10 +591,10 @@ public final class FabricPlatform implements PackHost, CommandHost {
     }
 
     /** 客户端回执（由 mixin 转进来）。 */
-    public void onResponse(ServerPlayer player, net.minecraft.network.protocol.common.ServerboundResourcePackPacket.Action action) {
+    public void onResponse(ServerPlayer player, UUID pushId, net.minecraft.network.protocol.common.ServerboundResourcePackPacket.Action action) {
         FabricPackDelivery current = delivery;
         if (current != null) {
-            current.onResponse(player, action);
+            current.onResponse(player, pushId, action);
         }
     }
 

@@ -113,6 +113,9 @@ class PackPublisher(private val plugin: PackHost) {
      * 统一推送调度器；下发器未就绪时返回 null，调用方退回逐个推送。
      */
     fun fanout(): FanoutController? {
+        if (!active.get()) {
+            return null
+        }
         val delivery = plugin.delivery() ?: return null
         fanoutRef.get()?.let { return it }
         synchronized(this) {
@@ -307,7 +310,7 @@ class PackPublisher(private val plugin: PackHost) {
                 val targets = plugin.onlinePlayers().map { it.uniqueId() }
                 val controller = fanout()
                 if (controller != null) {
-                    // force 不看客户端已加载状态，空 sha1 表示无条件重推
+                // force 不看客户端已加载状态；摘要仍传当前包，便于回执配对。
                     controller.enqueue(targets, result.sha1(), false, force = true)
                     plugin.logger().info("按 force 排队重推 " + targets.size + " 名玩家")
                 } else {

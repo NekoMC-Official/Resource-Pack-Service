@@ -42,13 +42,14 @@ class FanoutController @JvmOverloads constructor(
         val window: Int,
     )
 
-    private class Task(
+    private data class Task(
         val player: UUID,
         val sha1: String,
         val attempts: Int,
         val readyAt: Long,
         val seq: Long,
         val force: Boolean,
+        val join: Boolean,
     )
 
     private class Inflight(
@@ -64,7 +65,7 @@ class FanoutController @JvmOverloads constructor(
     private val joinQueue = PriorityQueue<Task>(compareBy({ it.readyAt }, { it.seq }))
     private val broadcastQueue = PriorityQueue<Task>(compareBy({ it.readyAt }, { it.seq }))
     private val inflight = HashMap<UUID, Inflight>()
-    private val pending = HashSet<UUID>()
+    private val pending = HashMap<UUID, Task>()
 
     private var ticker: Scheduler.Cancellable? = null
     private var closed = false
@@ -118,12 +119,18 @@ class FanoutController @JvmOverloads constructor(
                     dropped++
                     continue
                 }
-                if (!pending.add(player)) {
+                val previous = pending[player]
+                if (previous != null && previous.sha1 == target) {
                     dropped++
                     continue
                 }
+                if (previous != null) {
+                    // 换代：旧任务被新任务替换；队列里的旧项在派发时按 seq 识别并丢掉。
+                    dropped++
+                }
                 val readyAt = if (join) now + ThreadLocalRandom.current().nextLong(jitterMs + 1L) else now
-                val task = Task(player, target, 0, readyAt, seq++, force)
+                val task = Task(player, target, 0, readyAt, seq++, force, join)
+                pending[player] = task
                 if (join) {
                     joinQueue.add(task)
                 } else {
@@ -136,15 +143,16 @@ class FanoutController @JvmOverloads constructor(
     /**
      * 客户端回执：释放并发窗口；失败按配置重试一次。
      *
-     * <p>回执带的摘要与在途任务不一致时（上一次发布的包迟到的回执），只释放窗口、计一次
-     * dropped，不消耗重试次数——否则旧代回执会把新代的重试额度吃掉。</p>
+     * <p>回执带的摘要与在途任务不一致时（上一次发布的包迟到的回执），只计一次 dropped 后忽略：
+     * 当前在途的已经是新代，旧代回执不能清掉它的槽位，也不能消耗新代的重试额度；
+     * 这个槽位由 expireInflight 在超时后回收。</p>
      */
     @JvmOverloads
     fun onStatus(player: UUID, status: PackStatus, sha1: String, now: Long = clock()) {
         synchronized(lock) {
             val current = inflight[player] ?: return
             if (sha1.isNotBlank() && current.sha1.isNotBlank() && sha1 != current.sha1) {
-                inflight.remove(player)
+                // 当前在途任务已经是新代：旧代的迟到回执不能把它清掉，否则新代会被记错。
                 dropped++
                 return
             }
@@ -161,9 +169,19 @@ class FanoutController @JvmOverloads constructor(
                     inflight.remove(player)
                     windowFailures++
                     val retrySha1 = sha1.ifBlank { current.sha1 }
-                    if (current.attempts < retryLimit && !closed && pending.add(player)) {
+                    val queued = pending[player]
+                    if (queued != null) {
+                        if (queued.sha1 != retrySha1) {
+                            // 新代已经在队列里：旧代的失败重试不能把它挤掉。
+                            dropped++
+                        }
+                        return
+                    }
+                    if (current.attempts < retryLimit && !closed) {
+                        val retry = Task(player, retrySha1, current.attempts + 1, now + retryDelayMs, seq++, current.force, false)
+                        pending[player] = retry
                         retried++
-                        broadcastQueue.add(Task(player, retrySha1, current.attempts + 1, now + retryDelayMs, seq++, current.force))
+                        broadcastQueue.add(retry)
                     } else {
                         failed++
                     }
@@ -225,42 +243,57 @@ class FanoutController @JvmOverloads constructor(
                 expireInflight(now)
                 while (due.size < TICK_LIMIT && inflight.size < window) {
                     val head = takeReady(now) ?: break
-                    pending.remove(head.player)
-                    if (inflight.containsKey(head.player)) {
-                        dropped++
-                        continue
+                val latest = pending[head.player]
+                if (latest == null || latest.seq != head.seq) {
+                    // 队列里的旧代任务：已被更新的任务替换，丢掉旧项即可。
+                    dropped++
+                    continue
+                }
+                if (inflight.containsKey(head.player)) {
+                    // 上一代还没回执：把这一代按重试间隔延后，新包不能丢。
+                    val delayed = head.copy(readyAt = now + retryDelayMs)
+                    pending[head.player] = delayed
+                    if (head.join) {
+                        joinQueue.add(delayed)
+                    } else {
+                        broadcastQueue.add(delayed)
                     }
-                    inflight[head.player] = Inflight(head.sha1, now, head.attempts, head.force)
+                    continue
+                }
+                pending.remove(head.player)
+                inflight[head.player] = Inflight(head.sha1, now, head.attempts, head.force)
                     due.add(head)
                 }
-                pushed += due.size
                 windowPushes += due.size
                 rampWindow(now)
             }
-        } catch (error: Throwable) {
-            synchronized(lock) { ticking = false }
-            throw error
-        }
-        for (task in due) {
-            if (synchronized(lock) { closed }) {
-                break
-            }
-            val accepted = try {
-                delivery.push(task.player, task.sha1, true)
-            } catch (error: Throwable) {
-                logger.warning("推送失败：" + (error.message ?: error.javaClass.simpleName))
-                0
-            }
-            if (accepted <= 0) {
-                synchronized(lock) {
-                    inflight.remove(task.player)
-                    dropped++
-                    windowFailures++
+            for (task in due) {
+                if (synchronized(lock) { closed }) {
+                    break
+                }
+                val accepted = try {
+                    delivery.push(task.player, task.sha1, task.force)
+                } catch (error: Throwable) {
+                    logger.warning("推送失败：" + (error.message ?: error.javaClass.simpleName))
+                    0
+                }
+                if (accepted <= 0) {
+                    synchronized(lock) {
+                        inflight.remove(task.player)
+                        dropped++
+                        windowFailures++
+                    }
+                } else {
+                    synchronized(lock) {
+                        // 只有真正交到平台手上的才算推送成功。
+                        pushed++
+                    }
                 }
             }
-        }
-        synchronized(lock) {
-            ticking = false
+        } finally {
+            synchronized(lock) {
+                ticking = false
+            }
         }
     }
 

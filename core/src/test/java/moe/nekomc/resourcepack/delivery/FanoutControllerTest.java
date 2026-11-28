@@ -78,6 +78,27 @@ class FanoutControllerTest {
     }
 
     @Test
+    void failedRetryDoesNotDisplaceQueuedGeneration() {
+        FakeDelivery delivery = new FakeDelivery();
+        FakeScheduler scheduler = new FakeScheduler();
+        FanoutController controller = controller(delivery, scheduler, 1, 1);
+        UUID player = UUID.randomUUID();
+
+        controller.enqueue(List.of(player), "h1", false);
+        scheduler.tick();
+        assertEquals(1, delivery.pushed.size());
+
+        controller.enqueue(List.of(player), "h2", false);
+        controller.onStatus(player, PackStatus.FAILED, "h1");
+        scheduler.tick();
+
+        assertEquals(2, delivery.pushed.size(), "旧代的失败不能挤掉队列里的新代");
+        assertEquals(0, controller.stats().getRetried());
+        assertEquals(List.of("h1", "h2"), delivery.sentSha);
+        controller.close();
+    }
+
+    @Test
     void duplicateEnqueueForSamePlayerIsDropped() {
         FakeDelivery delivery = new FakeDelivery();
         FakeScheduler scheduler = new FakeScheduler();
@@ -116,11 +137,18 @@ class FanoutControllerTest {
 
     private static final class FakeDelivery implements PackDelivery {
         private final List<UUID> pushed = new ArrayList<>();
+        private final List<String> sentSha = new ArrayList<>();
         private final Map<UUID, String> loaded = new HashMap<>();
 
         @Override
         public int push(UUID player, boolean force) {
+            return push(player, "", force);
+        }
+
+        @Override
+        public int push(UUID player, String sha1, boolean force) {
             pushed.add(player);
+            sentSha.add(sha1);
             return 1;
         }
 

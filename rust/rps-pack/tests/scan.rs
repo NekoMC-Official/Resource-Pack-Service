@@ -280,3 +280,20 @@ fn archive_fallback_validates_name_after_scan() {
     assert!(message.contains("扫描后被改动"), "{message}");
     assert!(message.contains("src-0"), "{message}");
 }
+
+#[test]
+fn check_unchanged_detects_replaced_source() {
+    let dir = work("scan-unchanged");
+    let path = dir.join("src-0.zip");
+    write_source(&path, "m0", 2);
+    let specs = vec![SourceSpec {
+        id: "src-0".to_string(),
+        priority: 0,
+        path: path.clone(),
+    }];
+    let readers = open_sources(&specs, 1).expect("扫描来源");
+    readers[0].check_unchanged().expect("未改动应通过");
+    write_source(&path, "m1", 3);
+    let error = readers[0].check_unchanged().expect_err("替换后应报错");
+    assert!(format!("{error}").contains("在扫描后被改动"), "{error}");
+}

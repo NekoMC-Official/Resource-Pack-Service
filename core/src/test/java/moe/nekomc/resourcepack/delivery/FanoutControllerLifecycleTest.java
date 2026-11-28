@@ -46,19 +46,16 @@ class FanoutControllerLifecycleTest {
         assertEquals(1, controller.stats().getInflight());
 
         controller.onStatus(player, PackStatus.LOADED, "old", clock.get());
-        assertEquals(0, controller.stats().getInflight(), "迟到回执只释放窗口");
+        assertEquals(1, controller.stats().getInflight(), "迟到回执不得清掉新代的槽位");
         assertEquals(1L, controller.stats().getDropped());
         assertEquals(0L, controller.stats().getCompleted(), "旧代回执不能算新代完成");
         assertEquals(0L, controller.stats().getRetried(), "迟到回执不得触发重试");
         scheduler.tick();
         assertEquals(1, delivery.pushed.size(), "迟到回执不应产生新推送");
 
-        // 旧代回执不能吃掉新代的重试额度：重新排队后第一次失败仍然可以重试。
-        controller.enqueue(List.of(player), "new", false, clock.get());
-        scheduler.tick();
-        controller.onStatus(player, PackStatus.FAILED, "new", clock.get());
-        assertEquals(1L, controller.stats().getRetried(), "新代第一次失败应重试");
-        assertEquals(1, controller.stats().getQueued());
+        controller.onStatus(player, PackStatus.LOADED, "new", clock.get());
+        assertEquals(0, controller.stats().getInflight(), "新代回执才释放槽位");
+        assertEquals(1L, controller.stats().getCompleted());
         controller.close();
     }
 
@@ -187,10 +184,48 @@ class FanoutControllerLifecycleTest {
         assertTrue(delivery.sentForce, "下发器应看到 force");
         assertEquals(1, controller.stats().getInflight());
 
-        // 迟到的旧代回执只释放槽位，不能算作这一代的完成。
+        // 迟到的旧代回执不清掉当前代的槽位，也不算完成。
         controller.onStatus(player, PackStatus.LOADED, "older", clock.get());
         assertEquals(0L, controller.stats().getCompleted(), "旧代回执不应算完成");
-        assertEquals(0, controller.stats().getInflight(), "旧代回执仍要释放槽位");
+        assertEquals(1, controller.stats().getInflight(), "旧代回执不平白释放当前代的槽位");
+        controller.onStatus(player, PackStatus.LOADED, "sha", clock.get());
+        assertEquals(1L, controller.stats().getCompleted());
+        assertEquals(0, controller.stats().getInflight());
+        controller.close();
+    }
+
+    @Test
+    void newerGenerationReplacesPendingTaskInsteadOfDropping() {
+        FanoutController controller = controller(1, 0, 1, false);
+        UUID player = UUID.randomUUID();
+        controller.enqueue(List.of(player), "v1", false, clock.get());
+        scheduler.tick();
+        assertEquals(1, controller.stats().getInflight());
+
+        // 旧代还在途中时发布新包：新任务应留在队列里，不能被去重逻辑丢掉。
+        controller.enqueue(List.of(player), "v2", false, clock.get());
+        controller.onStatus(player, PackStatus.LOADED, "v1", clock.get());
+        assertEquals(0, controller.stats().getInflight(), "旧代回执释放窗口");
+        scheduler.tick();
+        assertEquals(1, controller.stats().getInflight(), "旧代回执后新代应被派发");
+        assertEquals("v2", delivery.sentSha1s.get(delivery.sentSha1s.size() - 1));
+        assertEquals(2, delivery.pushed.size());
+        controller.close();
+    }
+
+    @Test
+    void forcedGenerationReplacesPendingTaskToo() {
+        FanoutController controller = controller(1, 0, 1, false);
+        UUID player = UUID.randomUUID();
+        controller.enqueue(List.of(player), "v1", false, clock.get());
+        scheduler.tick();
+
+        controller.enqueue(List.of(player), "v2", false, clock.get(), true);
+        controller.onStatus(player, PackStatus.LOADED, "v1", clock.get());
+        scheduler.tick();
+        assertEquals(2, delivery.pushed.size(), "强制推送同样不能被在途任务吃掉");
+        assertEquals("v2", delivery.sentSha1s.get(delivery.sentSha1s.size() - 1));
+        assertTrue(delivery.sentForce, "第二批应带 force");
         controller.close();
     }
 
@@ -222,6 +257,7 @@ class FanoutControllerLifecycleTest {
         final Map<UUID, String> loaded = new HashMap<>();
         int accepted = 1;
         String sentSha1 = "";
+        final List<String> sentSha1s = new ArrayList<>();
         boolean sentForce;
 
         @Override
@@ -236,6 +272,7 @@ class FanoutControllerLifecycleTest {
             }
             pushed.add(player);
             sentSha1 = sha1;
+            sentSha1s.add(sha1);
             sentForce = force;
             return accepted;
         }

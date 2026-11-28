@@ -38,6 +38,8 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
     private final String rejectMessage;
     private final DeliveryStatusStore statuses = new DeliveryStatusStore();
     private final ConcurrentHashMap<UUID, String> pushedSha1 = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, UUID> lastPushId = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, String> lastSha1ByPlayer = new ConcurrentHashMap<>();
     private volatile String lastUrl = "";
     private volatile String lastSha1 = "";
     private volatile boolean closed;
@@ -180,6 +182,7 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
         Optional<net.minecraft.network.chat.Component> hint =
             prompt.isBlank() ? Optional.empty() : Optional.of(MiniMessages.parse(prompt));
         boolean needed = announceRequired;
+        UUID pushId = UUID.randomUUID();
         platform.runOnServer(() -> {
             ServerPlayer online = platform.player(playerId);
             if (online == null) {
@@ -192,8 +195,13 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
             }
             platform.logger().info(LOG_PREFIX + "向玩家 " + online.getGameProfile().name() + " 推送资源包（必装提示=" + needed + "）：" + target);
             online.connection.send(new ClientboundResourcePackPushPacket(
-                UUID.randomUUID(), target, targetSha1, needed, hint));
-            pushedSha1.put(playerId, targetSha1);
+                pushId, target, targetSha1, needed, hint));
+            pushedSha1.put(pushId, targetSha1);
+            lastSha1ByPlayer.put(playerId, targetSha1);
+            UUID previousPush = lastPushId.put(playerId, pushId);
+            if (previousPush != null) {
+                pushedSha1.remove(previousPush);
+            }
             statuses.record(playerId, online.getGameProfile().name(), PackStatus.PENDING, targetSha1);
             platform.statusChanged(playerId, online.getGameProfile().name(), PackStatus.PENDING, targetSha1);
         });
@@ -243,7 +251,11 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
     /** 玩家下线：清掉当前状态，历史留给 /rps rejected。 */
     public void onQuit(UUID playerId) {
         statuses.remove(playerId);
-        pushedSha1.remove(playerId);
+        lastSha1ByPlayer.remove(playerId);
+        UUID sent = lastPushId.remove(playerId);
+        if (sent != null) {
+            pushedSha1.remove(sent);
+        }
         var publisher = platform.publisher();
         var controller = publisher == null ? null : publisher.fanoutOrNull();
         if (controller != null) {
@@ -252,13 +264,15 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
     }
 
     /** 客户端回执：mixin 已经把我们发的包交给这里。 */
-    public void onResponse(ServerPlayer player, ServerboundResourcePackPacket.Action action) {
+    public void onResponse(ServerPlayer player, UUID pushId, ServerboundResourcePackPacket.Action action) {
         if (player == null || action == null) {
             return;
         }
         UUID id = player.getUUID();
         String name = player.getGameProfile().name();
-        String sha1 = pushedSha1.getOrDefault(id, lastSha1);
+        UUID sentId = pushId != null ? pushId : lastPushId.get(id);
+        String fallback = lastSha1ByPlayer.getOrDefault(id, lastSha1);
+        String sha1 = sentId == null ? fallback : pushedSha1.getOrDefault(sentId, fallback);
         PackStatus mapped = switch (action) {
             case SUCCESSFULLY_LOADED -> PackStatus.LOADED;
             case DECLINED -> PackStatus.DECLINED;
@@ -274,6 +288,10 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
             // DISCARDED 是客户端丢弃旧包（换包/退出）的通知，Paper 侧同样不记录、不断开。
             platform.logger().fine(LOG_PREFIX + "玩家 " + name + " 丢弃了资源包通知");
             return;
+        }
+        if (sentId != null && mapped != PackStatus.PENDING) {
+            // 终态回执才消费 pushId 映射：ACCEPTED/DOWNLOADED 之后还有一次 SUCCESSFULLY_LOADED。
+            pushedSha1.remove(sentId);
         }
         // 26.3 的同一次加载会从 Netty 与主线程各投递一次同样回执，重复状态只记第一次，
         // 免得重复打日志、重复触发断开排程。
@@ -333,5 +351,7 @@ public final class FabricPackDelivery implements PackDelivery, AutoCloseable {
         lastUrl = "";
         lastSha1 = "";
         pushedSha1.clear();
+        lastPushId.clear();
+        lastSha1ByPlayer.clear();
     }
 }

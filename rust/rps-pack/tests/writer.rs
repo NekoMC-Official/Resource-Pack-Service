@@ -336,3 +336,23 @@ fn zip64_directory_starts_at_65535_entries() {
         assert_eq!(has_eocd64, expect_zip64, "{count} 条目时的 zip64 判定");
     }
 }
+
+#[test]
+fn stored_crc_mismatch_is_rejected() {
+    let dir = work("writer-crc");
+    let path = dir.join("out.zip");
+    let data = b"crc check payload".repeat(32);
+    let mut writer = ZipArchiveWriter::create(&path, 6).expect("创建写入器");
+    let mut cursor = std::io::Cursor::new(data.clone());
+    let error = writer
+        .add_raw(
+            "assets/demo/bad.bin",
+            0,
+            data.len() as u64,
+            data.len() as u64,
+            0,
+            &mut cursor,
+        )
+        .expect_err("CRC 不符应失败");
+    assert!(format!("{error}").contains("CRC-32 不符"), "{error}");
+}

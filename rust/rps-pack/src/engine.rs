@@ -649,13 +649,37 @@ fn resolve(project_root: &Path, raw: &str) -> PathBuf {
     project_root.join(path)
 }
 
+/// 写出用的同目录临时文件：成功替换前一直由 Drop 负责清理，失败不会留下半成品。
+struct TempOutput {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl TempOutput {
+    fn new(path: PathBuf) -> Self {
+        Self { path, keep: false }
+    }
+}
+
+impl Drop for TempOutput {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn write_zip(
     entries: BTreeMap<String, Winner>,
     readers: &mut [SourceReader],
     output: &Path,
     verify_sources: bool,
 ) -> Result<WriteStats> {
-    let mut writer = ZipArchiveWriter::create(output, DEFLATE_LEVEL)?;
+    for reader in readers.iter() {
+        reader.check_unchanged()?;
+    }
+    let mut temp = TempOutput::new(temp_output(output));
+    let mut writer = ZipArchiveWriter::create(&temp.path, DEFLATE_LEVEL)?;
     // 逐个取走：名字直接搬进 writer，BTreeMap 的节点与键随迭代释放。
     for (name, winner) in entries {
         let name = name.into_bytes();
@@ -694,7 +718,21 @@ fn write_zip(
             }
         }
     }
-    writer.finish()
+    let stats = writer.finish()?;
+    std::fs::rename(&temp.path, output).map_err(|error| {
+        MergeError::new(format!("替换输出失败 {}: {error}", output.display()))
+    })?;
+    temp.keep = true;
+    Ok(stats)
+}
+
+/// 同目录临时文件：写完再原子替换，失败由 TempOutput 清理。
+fn temp_output(output: &Path) -> PathBuf {
+    let name = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("merged.zip");
+    output.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 /// 解压并核对来源条目的 CRC 与大小；只在请求显式要求时执行。

@@ -1236,3 +1236,56 @@ Rust 52 项（lib 7 + merge 26 + mcmeta 2 + writer 9 + serve 1 + scan 7）。新
 
 至此加码清单的每一项都有结论：S10b（§36）、体积比（§37）、大条目直拷（§38）已交付；源索引 LRU、≥4 GiB zip64、mmap 源三项在本节按「不做」收口；非临时写仍按 §34.5 descoped。§22 的 S6/S8 两行已同步标注。§2 与 §5/§7/§11/§16 里仍保留 mmap、索引缓存这些当初的设计手段与待办勾选框，未落地部分以本节为准（§7:414 已改「不用」，§16 P3/P4 已标 descoped）。
 
+
+## 40. 全面审查（2026-11-28，18 提交）
+
+### 40.1 Rust：来源身份与原子输出
+
+复审发现两处「默认配置下可能静默产出坏包 / 失败后留下坏文件」的问题，均已在 rust/rps-pack 修掉：
+
+| 问题 | 修法 |
+| --- | --- |
+| 扫描后来源被整体替换，直拷仍用旧偏移，产物与报告不一致且不报错 | SourceReader 在 open 时记下文件大小与修改时间，写出前调用 check_unchanged()；不一致就报「来源 … 在扫描后被改动」并放弃写出 |
+| stored 条目内容被改而 CRC 不校验（add_raw 直接信任中央目录） | 直拷 stored 时顺流计算 CRC-32，与扫描期记录值比对，不符报「CRC-32 不符」 |
+| 写出失败或进程中断会在 output 路径留下半成品 | 先写同目录临时文件，成功 rename 原子替换；TempOutput 的 Drop 在失败路径清理临时文件 |
+
+另外把「stored 声明长度不一致」从静默降级改成扫描期报错——降级后走 deflate 读同样会失败，早报错更清楚。
+
+### 40.2 JVM：回执配对、会话冷却与调度收尾
+
+| 位置 | 问题 | 修法 |
+| --- | --- | --- |
+| Paper PackPusher.onStatus | 回执 SHA-1 取「该玩家最近一次推送」，旧包迟到回执会错配新槽位 | 优先用 event.getHash()（客户端报告的实际包），为空才回退 |
+| Fabric FabricPackDelivery | 同上，且 mixin 只转 action | 每次推送生成 push id 并存 pushId → sha1，mixin 转 packet.id()，回执按 id 取 |
+| RustPackServe | 一次瞬时失败永久拉黑常驻会话，无日志 | 冷却 60 秒，期间走一次性进程；首次失败打一行告警，成功后清除 |
+| FanoutController.tick | 后半段无 finally，异常会让 ticking 永真、队列停摆 | 整个 tick 包在 try/finally，结束统一复位 |
+| PackPublisher.fanout() | supersede / disable 后仍可新建调度器 | 先查 active，不活跃直接返回 null |
+| SourceWatcher.start() | 首次变动不受防抖约束，半写入的包会被立即合并 | 启动时把 lastFireAt 置为当前时间 |
+| RustPackMerger | 报告缺 bytes/entries 时抛 NPE | 显式检查并抛 MergeUnavailableException |
+
+### 40.3 HTTP 出口与推送队列（复审第二轮）
+
+| 位置 | 问题 | 修法 |
+| --- | --- | --- |
+| FanoutController | 换代时新任务被 pending 去重或「已有在途」判定直接丢掉，发布新包/群体推送对部分玩家静默失效 | pending 改成 Map<UUID, Task> 只留最新一代；队列里的旧项按 seq 丢弃；上一代未回执时把新任务延后 retryDelayMs 重排，不丢 |
+| PackHttpServer.etagFor | 冷启动并发请求各自把整包读一遍算 SHA-1 | 按文件键的 CompletableFuture single-flight，同键只算一次，其余等待结果 |
+| PackHttpServer 线程池 | 无界队列让超限连接排队而不是 503，慢客户端可绕过准入 | 有界队列 512 + 拒绝计数；拒绝由 JDK HttpServer 关闭连接，rejectedRequests() 可观测 |
+| If-None-Match | contains 子串匹配，且不识别通配符 | 按 RFC 9110 拆逗号、去 W/ 前缀、支持 * |
+| sha1Of 失败 | 会发出 ETag: "" | 空摘要不发 ETag 头 |
+| 传输异常 | 已预约的令牌不退 | transferTo 抛错时 refund 当次预约 |
+| FanoutController.push | 恒传 force=true，任务里的 force 没用上 | 传 task.force；两平台 push 仍忽略 force，强制语义只在入队过滤层生效 |
+| FanoutController.onStatus | 旧代的 FAILED 回执会把 pending 换成旧代重试，挤掉已排队的新代；迟到的 LOADED 回执还会清掉新代槽位 | 队列里有新代时只计 dropped 并返回；不一致的迟到回执不再清当前代槽位 |
+| Fabric pushId 记账 | pushedSha1 按 playerId 写、按 pushId 读，永远 miss、回退全局摘要 | 按 pushId 写、终态回执后删除，另存 lastSha1ByPlayer 作回退；close 清空两张表 |
+| FanoutController.pushed | 派发即累加，平台拒收时又计 dropped | 只有 push 返回正数才计成功 |
+| etagFor 键计算 | Files.size / getLastModifiedTime 抛 IOException 会断开连接 | 捕获后按「本次不发 ETag」处理 |
+| ETag 缓存 | 摘要计算失败（空串）也写缓存，该版本此后一直不发 ETag | 空摘要不写缓存 |
+| /rps push 单人、无调度器时的直推 | 不占并发窗口、不做去重 | 已知边界：单飞只覆盖 FanoutController 的批量路径，注释与本节写明 |
+| check_unchanged 的粒度 | 只比大小与修改时间，且只在写出前查一次 | 已知边界：同大小同时间戳的就地改写检测不到；硬杀或 panic=abort 可能留下同目录 .tmp（不自动清扫、rename 前不 fsync） |
+| 令牌桶退款 | transferTo 抛错时按整块退，可能多退已写出的部分 | 已知边界：最多多退一个 64 KiB 块，方向是放宽限速，不会超发 |
+
+
+### 40.4 验证
+
+- Rust：56 项（lib 7 + mcmeta 2 + merge 27 + scan 9 + serve 1 + writer 10），新增 check_unchanged_detects_replaced_source、stored_crc_mismatch_is_rejected。
+- JVM：core 21 个套件 / 115 项（4 项需 RPS_PACK_BIN），paper 2 / 7；全量构建 BUILD SUCCESSFUL。
+- jar 守卫：Paper 2,635,331 B ≤ 2,750,000；Fabric 2,783,000 B ≤ 2,900,000。新增 failedRetryDoesNotDisplaceQueuedGeneration，并把两处「迟到回执释放槽位」的断言改为「不清槽位、只计 dropped」。
