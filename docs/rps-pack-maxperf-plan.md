@@ -18,7 +18,7 @@ raw copy 解决的是「不要重复压缩」，它把 W1 从 4.07 s 拉到 0.13
 | W1 超大（270 MB / 469 条） | ~0.25 s / 15–30 MB | **0.16–0.20 s / ≤25 MB** | mmap + 顺序标志 + 预分配 + 写时哈希 |
 | W2 超多（84 MB / 5,063 条） | ~0.47 s / 55 MB | **0.30–0.40 s / ≤40 MB** | 自写顺序 writer、紧凑元数据、并行扫描 |
 | 巨量（200 源 / 40 万条） | 未测，zip crate 固定开销约 8 s（估算） | **≤1.5 s / ≤150 MB** | 自写 writer（每条目 ~1.5 µs）+ 索引缓存 |
-| 单条巨型（1 GB） | 受 64 MB 条目上限阻断 | **≤1.2 s，支持 zip64** | 流式哈希、非临时写、取消解压上限 |
+| 单条巨型（1 GB） | 受 64 MB 条目上限阻断 | **≤1.2 s，支持 zip64**（descoped，见 §34.5） | 流式哈希、取消解压上限 |
 
 一句话：**先不做事，再少拷贝，最后才谈并行**。
 
@@ -70,7 +70,7 @@ raw copy 解决的是「不要重复压缩」，它把 W1 从 4.07 s 拉到 0.13
        + 压缩(仅合并条目)
 ~~~
 
-- **超大包**：写带宽与哈希带宽决定上限。270 MB / 1.8 GB/s ≈ 0.15 s，哈希 0.10 s，重叠后 ≈0.15–0.20 s。再快只能靠平台 I/O（预分配、顺序标志、非临时写）或减少拷贝次数。
+- **超大包**：写带宽与哈希带宽决定上限。旧估算 270 MB / 1.8 GB/s ≈ 0.15 s、重叠后 ≈0.15–0.20 s 已作废（实测 235 ms，见 §34.3）。再快只能靠减少拷贝次数，或把哈希从临界路径上挪开：平台专有 I/O 已在 §34 评估后放弃，非临时写降级为待办；实测瓶颈是 SHA-1 与写入串行，见 S14。
 - **超多包**：条目数 × 固定开销决定上限。22 µs/条 × 5,063 ≈ 0.11 s，但 W2 实测 0.47 s 说明扫描/读取也占一半；40 万条时固定开销会放大到 8 s 量级（估算），必须把每条目成本压到 ~1.5 µs。
 - **小包**：16 ms 启动 > 全部工作。只有两条路：让进程更便宜（静态 CRT、裁剪），或者**根本不要每次启动**（常驻合并进程）。
 - **压缩率**：raw copy 已把不可压缩资产排除在外；剩下能优化的只有合并 JSON 的 level 与极小块的选择。
@@ -99,7 +99,7 @@ engine.rs        判定档位 + 编排
   │    ├─ mod.rs     顺序 writer 接口（自有实现，替换 zip crate 写出）
   │    ├─ zip64.rs   中央目录 / EOCD / zip64 extra
   │    ├─ deflate.rs 仅合并条目的 deflate（flate2 zlib-rs）
-  │    └─ io_win.rs / io_linux.rs / io_mac.rs   平台 I/O
+  │    └─ io_win.rs（未采用）   平台 I/O 原计划，§34 评估后不建
   ├─ hash.rs     流式 SHA-1（写时哈希）
   ├─ cache.rs    索引缓存 + 构建指纹
   └─ daemon.rs   常驻模式（--serve，P6）
@@ -183,9 +183,9 @@ zip crate 9.8.2 的写出路径每条目都有 HashMap 插入、头部 Vec 分�
 
 | 手段 | API | 预期 | 风险 |
 | --- | --- | --- | --- |
-| 顺序读提示 | `FILE_FLAG_SEQUENTIAL_SCAN`（`OpenOptionsExt::custom_flags`） | 大文件读 +5–10%（估算） | 低 |
-| 输出预分配 | `SetFileInformationByHandle(FileAllocationInfo)` | 减少碎片，写 +3–8%（估算） | 需 windows-sys 依赖或裸 FFI |
-| 大段非临时写 | `_mm_stream_si128` | 270 MB 写 +5–12%（估算） | 需 16 B 对齐；仅 Huge 档 |
+| 顺序读提示 | `FILE_FLAG_SEQUENTIAL_SCAN`（`OpenOptionsExt::custom_flags`） | 现有 ≥8 MiB 来源句柄已用（§6）；给直拷/输出句柄新增的部分热缓存无收益（§34.3），未采用 | 低 |
+| 输出预分配 | `SetFileInformationByHandle(FileAllocationInfo)` | 减少碎片，写 +3–8%（估算）；未采用 | 需 windows-sys 依赖或裸 FFI |
+| 大段非临时写 | `_mm_stream_si128` | 270 MB 写 +5–12%（估算）；未采用，降级为待办（§34.5） | 需 16 B 对齐；仅 Huge 档 |
 | mmap 源 | `memmap2`（底层 CreateFileMapping） | 省一次拷贝 | 文件被替换时的映射语义 |
 | 常驻进程 | 命名管道或 stdio | 小包 16 ms → 1–3 ms | 生命周期管理（P6） |
 
@@ -193,16 +193,16 @@ zip crate 9.8.2 的写出路径每条目都有 HashMap 插入、头部 Vec 分�
 
 | 手段 | API | 预期 | 风险 |
 | --- | --- | --- | --- |
-| 内核区间拷贝 | `copy_file_range`（源 fd → 输出 fd） | raw copy 段 +20–40%（估算） | 需自写 writer 才能绕过 zip crate；跨文件系统回退 |
-| 顺序预读 | `posix_fadvise(SEQUENTIAL)` | +5% | 低 |
-| 预分配 | `fallocate` | +3–8% | 低 |
+| 内核区间拷贝 | `copy_file_range`（源 fd → 输出 fd） | raw copy 段 +20–40%（估算，**已作废**：与单趟 SHA-1 冲突，见 §34） | 需自写 writer 才能绕过 zip crate；跨文件系统回退 |
+| 顺序预读 | `posix_fadvise(SEQUENTIAL)` | 未采用（提示级、本机无法验证，见 §34.5） | 低 |
+| 预分配 | `fallocate` | 未采用（见 §34.5） | 低 |
 | 异步 I/O | io_uring（可选，P6 研究） | 大量小读 +10–20%（估算） | 复杂度高、内核版本要求 |
 
 ### 8.3 macOS
 
 | 手段 | API | 预期 | 风险 |
 | --- | --- | --- | --- |
-| 区间拷贝 | `fcopyfile` | 同 copy_file_range | 低 |
+| 区间拷贝 | `fcopyfile` | 未采用（与单趟 SHA-1 冲突，见 §34.5） | 低 |
 | 预分配 | `F_PREALLOCATE` | 写 +3–8% | 低 |
 
 > CI 只在 Linux 跑；Windows/macOS 的平台路径用单元测试 + 本机基准验证，未验证的路径默认关闭（feature gate 默认关），避免“纸面优化”。
@@ -273,9 +273,9 @@ zip crate 9.8.2 的写出路径每条目都有 HashMap 插入、头部 Vec 分�
 - 验收：真实样本 + 合成语料上，level 9 / store 阈值 / zopfli 三项各自达到「体积 ≥1% 或耗时 ≥10%」门槛才保留；否则删除该分支。
 - 回滚：单常量回退 level 6。
 
-### P6 平台 I/O + 常驻模式（2 人日，可选）
+### P6 平台 I/O + 常驻模式（2 人日，可选；平台 I/O 已评估、未采用，常驻模式即 S9）
 
-- 平台：Windows 顺序标志/预分配/非临时写；Linux copy_file_range/fadvise/fallocate；macOS fcopyfile。
+- 平台（曾评估）：Windows 现有顺序标志（已用）/预分配/非临时写（待办）；Linux copy_file_range/fadvise/fallocate、macOS fcopyfile 均未采用（见 §34）。
 - 常驻：`--serve` + 插件侧生命周期。
 - 验收：各平台基准提升 ≥5% 才保留；常驻模式小包端到端 ≤3 ms，且 24 h 无僵尸进程。
 - 回滚：feature 默认关。
@@ -546,7 +546,7 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 1. **不整包读入**：禁止对 zip 整体 read_to_end；只有需要重写的合并 JSON 才允许进内存，且单文件 ≤16 MB、合计 ≤64 MB。
 2. **每次构建一个 arena**：手写 bump arena（Vec<u8> + offset，无新依赖），构建结束整体释放；条目名、命名空间、临时字符串都往里放，把分配次数从 O(条目数) 降到 O(线程数)。
 3. **处处有界**：有序提交环 = 线程数 × 2；索引缓存 LRU ≤32 MB；冲突明细 ≤5,000 条；fanout 队列 = 在线玩家数；任何队列都不允许无界增长。
-4. **大文件只映射窗口**：Huge 档用只读 mmap + 顺序访问提示（Windows FILE_FLAG_SEQUENTIAL_SCAN，Linux fadvise SEQUENTIAL），**扫完立即 drop 映射**，不同时保留 40 个映射；madvise DONTNEED 及时归还。
+4. **大文件只映射窗口**：Huge 档用只读 mmap + 顺序访问提示（Windows FILE_FLAG_SEQUENTIAL_SCAN；Linux fadvise SEQUENTIAL 随 §34 评估放弃，本机无法验证），**扫完立即 drop 映射**，不同时保留 40 个映射；madvise DONTNEED 及时归还。
 5. **复用而非新建**：每线程一个 64 KB scratch buffer、一个 CRC/SHA1 实例；条目名用 interned id + &str 切片，不 per-entry 建 String。
 
 ### 21.3 数据结构（内存账）
@@ -601,7 +601,7 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 | 步 | 内容 | 产出 / 验收 |
 | --- | --- | --- |
 | S5 | Tiny 档：单线程、fs::read 直读、预分配、零线程 | 1 条微包 ≤14 ms；200 条/27 KB ≤18 ms |
-| S6 | Huge 档：mmap 窗口、>64 MB 单条流式、非临时写、zip64 | 270 MB ≤0.20 s / ≤60 MB；1 GB 单条 ≤1.2 s / ≤48 MB |
+| S6 | Huge 档：mmap 窗口、>64 MB 单条流式、zip64（非临时写与 1 GB 目标 descoped，见 §34.5） | 270 MB ≤0.20 s / ≤60 MB；1 GB 单条 ≤1.2 s / ≤48 MB（descoped） |
 | S7 | Many 档 + 多核：thread::scope、有序提交环、64 条动态领取、RPS_THREADS | 扫描 ≥2.8×、合并+压缩 ≥3.0×（4 线程）；W2 ≥1.10×；W1 退化 ≤3% |
 
 ### 阶段 3：运行期（2 天）
@@ -617,16 +617,17 @@ delivery.fanout.max-concurrent（默认 64）、delivery.fanout.egress-bps（默
 | 步 | 内容 | 产出 / 验收 |
 | --- | --- | --- |
 | S11 | JVM 对接：复用 Rust 返回的 sha1（去掉第二次全文件读）、新配置项、/rps status 展示压缩率与 fanout、reload 语义 | 端到端一次构建 + 推送通过；JVM 堆增量 ≤64 MB |
-| S12 | （可选）平台 I/O：Windows / Linux / macOS 裸 FFI，feature 默认关 | 与通用路径相比提升 ≥10% 才保留，否则删除 |
+| S12 | （可选）平台 I/O：Windows / Linux / macOS 裸 FFI，feature 默认关 | 与通用路径相比提升 ≥10% 才保留，否则删除（已评估，未采用，见 §34） |
 | S13 | 全量基准与文档：W1 / W2 / Tiny / 40 万条 / 1 GB 五档复测，更新 perf-benchmark、optimization-research、README | 五档数字齐全；jar 体积在 §18 上限内；回归 >20% 不允许发布 |
+| S14 | 哈希与写重叠：独立哈希线程 + 小块环形缓冲（顺序不变，SHA-1 仍覆盖每个字节） | W1 从约 235 ms 降到 ≤160 ms，颜色/大小不变；失败可退回同步哈希 |
 
 ### 依赖与顺序
 
-S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11 → S13；S9 与 S12 为可选支线，不阻塞主线。
+S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11 → S13；S9 与 S12 为可选支线，不阻塞主线；S14 来自 §34.4 的实测（S13 之后）。
 
 ### 总量
 
-主线约 **8.5 天**（S0 0.5 + S1–S4 3 + S5–S7 2 + S8 1 + S10 1 + S11–S13 1.5，含缓冲）；加 S9、S12 约再 2 天。第一片 S1 是风险最高的一步（字节级确定性与 zip64），也是后面所有优化的地基。
+主线约 **8.5 天**（S0 0.5 + S1–S4 3 + S5–S7 2 + S8 1 + S10 1 + S11–S13 1.5，含缓冲）；加 S9 约再 1 天；S12 已评估、未采用（只花评估时间，不排实施）；S14 待排。第一片 S1 是风险最高的一步（字节级确定性与 zip64），也是后面所有优化的地基。
 
 ### 每步的停止条件
 
@@ -714,7 +715,7 @@ S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11 → S
 ### 25.3 判断
 
 - **微包的下限是进程创建，不是合并逻辑**：内部耗时 0 ms，14.5 ms 全是 `CreateProcess` + 装载 + 退出。要突破必须靠 S9 的常驻 `--serve`（预计 1–3 ms）。
-- **W1 的残差**是纯内存/页缓存搬运：270 MB 读 + 270 MB 写 ≈ 236 ms，即约 1.15 GB/s。再快需要非临时写（S12）或 io_uring/重叠 I/O，不属于 S6。
+- **W1 的残差**：270 MB 读 + 270 MB 写 + 单趟 SHA-1 ≈ 236 ms。§34.4 的关闭哈希对照显示其中约 100 ms 是 SHA-1、且与写入串行；下一步是把哈希与写重叠（S14）。平台专有 I/O 已评估放弃，非临时写降级为待办。
 - **单趟哈希在热缓存下没有可测收益**（旧路径的回读也被页缓存吸收），价值在冷缓存与「少一趟失败面」，保留。
 - `measure.ps1` 的 40–50 ms 固定开销此前把微包数字整体抬高，之后的小包测量一律用 `latency.py`。
 
@@ -958,7 +959,7 @@ max-concurrent 夹在 1..1024，jitter-ms 夹在 0..10000，retry 夹在 0..3；
 
 ### 32.1 条目上限与基准工具
 
-计划里的「40 万条目」此前被 `scan.rs` 的 `MAX_TOTAL_ENTRIES = 20_000` 挡住，本轮放宽到 `500_000`（README 同步；约 175MB 元数据预算）。新增两个工具：
+计划里的「40 万条目」此前被 `scan.rs` 的 `MAX_TOTAL_ENTRIES = 20_000` 挡住，本轮放宽到 `500_000`（`rust/rps-pack/README.md` 同步；约 175MB 元数据预算）。新增两个工具：
 
 - `tools/bench/gen_tiers.py`：生成 micro（1 条 1KB）、small（200 条 JSON）、W1（3 源 270MB / 469 条）、many-400k（4 源 × 100,000 条小 JSON，共 400,001 条）与各自的 `request-<tier>.json`。
 - `tools/bench/run_tiers.py`：每档预热 1 次后计时，输出墙钟中位/最小/最大、内部 millis、字节数、条目数、冲突数、直拷数、SHA-1。
@@ -1025,4 +1026,60 @@ max-concurrent 夹在 1..1024，jitter-ms 夹在 0..10000，retry 夹在 0..3；
 
 ### 33.4 验证
 
-Rust 48 项全绿（lib 5 + merge 26 + mcmeta 2 + writer 7 + serve 1 + scan 7），无编译警告；`.tmp/build-all.ps1` EXIT=0，core 21 套件 / 107 项（4 项需 `RPS_PACK_BIN` 跳过）+ paper 2 / 7；jar 体积 Paper 2,600,335 B、Fabric 2,747,832 B，均低于守卫上限。
+Rust 48 项全绿（lib 5 + merge 26 + mcmeta 2 + writer 7 + serve 1 + scan 7），无编译警告；`.tmp/build-all.ps1` EXIT=0，core 21 套件 / 107 项（4 项需 `RPS_PACK_BIN` 跳过）+ paper 2 / 7；jar 体积 Paper 2,600,361 B、Fabric 2,747,858 B，均低于守卫上限。
+
+## 34. S12 平台 I/O：评估后保持默认（2026-11-28）
+
+S12 原计划给每个平台加专有 I/O 原语（Windows `FILE_FLAG_SEQUENTIAL_SCAN`、Linux `copy_file_range` / `fadvise` / `fallocate`、macOS `fcopyfile`）。本轮先用 A/B 实测 Windows 侧还能不能靠提示位再榨出一点，再用「关掉 SHA-1」的对照定位 W1 的真实瓶颈；结论是**提示位无收益、瓶颈不在 I/O 而在哈希，代码保持原样，另立 S14 做写与哈希的重叠**。
+
+### 34.1 现状
+
+- 读取：`scan.rs` 的 `open_source` 对 ≥8 MB 的来源已带 `FILE_FLAG_SEQUENTIAL_SCAN`（中央目录句柄）。直拷句柄走普通 `File::open`。
+- 写出：`writer.rs` 用 `BufWriter::with_capacity(1 MiB)` + `write_all` 顺序写，1 MiB 直拷缓冲 + 256 KiB 读取缓冲。
+- W1 一进一出 540 MB / 235 ms 折算约 2.3 GB/s，但这不是「I/O 到顶」的证据：同一线程里 `write_all` 之后紧接着 `hasher.update`，270 MB 的单趟 SHA-1（本机实测约 2.7 GB/s，即约 100 ms）与用户态拷贝都在同一临界路径上。见 34.4 的关闭哈希对照。
+
+### 34.2 A/B 方法
+
+两个只差这两处提示位的二进制（同一源码树、同 release 配置、LTO）：
+
+- base：HEAD（`678377c`）原样。
+- hint：直拷句柄改用 `open_source`（大文件带顺序提示）+ 输出文件 `OpenOptions` 带同一提示位。
+
+`.tmp/ab/ab.py` 对 w1 / w2 / many 三档各跑 10 次运行（base / hint 各 5 次，奇偶轮交换先后），取墙钟中位；产物按 `ab-<tier>-<key>.zip` 写在夹具目录里，避免互相覆盖。测量条件是**重复运行的热缓存**：同一夹具连续跑，`FILE_FLAG_SEQUENTIAL_SCAN` 的预期收益在冷缓存首次读，本轮的结论只覆盖热缓存，冷缓存与首次构建未测。原始脚本、base / hint 两个二进制（另有一个仅实验用的 hash-off 构建，见 34.4）与两份中位数记录都在 `.tmp/ab/`（临时目录，不进仓库）；逐次原始样本未留存，表中是当轮记录的中位，跨会话漂移见 34.3 的说明。
+
+### 34.3 结果（release，同机交错）
+
+| 档 | base 中位 | hint 中位 | base 内部 | hint 内部 |
+| --- | --- | --- | --- | --- |
+| W1 | 250.6 ms | 251.9 ms | 233 ms | 234 ms |
+| W2（40 源） | 127.5 ms | 131.9 ms | 108 ms | 110 ms |
+| many-400k | 941.9 ms | 959.9 ms | 924 ms | 939 ms |
+
+热缓存下提示位没有可测收益：三个档的差异（+0.5% ~ +3.4%）小于同一台机器跨会话的整体漂移——§33.3 的内部耗时为 218 / 99 / 862 ms，本轮为 233 / 108 / 924 ms，三档同比例上浮 7% ~ 9%，因此不能判定提示位更慢，只能判定「测不出收益」。原因也说得通：直拷阶段本就按中央目录顺序推进，内核预读已在最优状态；给输出句柄加读提示位没有语义。
+
+### 34.4 关掉 SHA-1 的对照：瓶颈不在 I/O
+
+为了区分「I/O 到顶」和「哈希/拷贝到顶」，另外编了一个实验二进制：在 `emit` 里加一个仅实验用的 `RPS_NO_HASH` 开关，跳过 `hasher.update`，其余代码、release 配置、LTO 完全相同（报告里的 sha1 会退化成空串的 `da39a3ee…`，正好可确认开关生效；这个开关不会进产品代码）。同样三档各 5 次交替：
+
+| 档 | 正常（带 SHA-1） | 关闭 SHA-1 | 差值 |
+| --- | --- | --- | --- |
+| W1 | 238.8 ms | 134.3 ms | **−104.5 ms（−44%）** |
+| W2（40 源） | 149.5 ms | 123.1 ms | −26.4 ms（−18%） |
+| many-400k | 879.5 ms | 933.9 ms | 落在噪声内（元数据/写入主导） |
+
+这一组和 34.3 不是同一构建：hash-off 二进制自身的基线是 238.8 / 149.5 / 879.5 ms，只取同一二进制内的差值（W1 −104.5 ms、W2 约 −26 ms），不要和 34.3 的 250.6 / 127.5 / 941.9 ms 直接换算百分比。
+
+结论很直接：W1 的 270 MB 单趟 SHA-1 约 100 ms，正好是总时间的两成多到四成；W2 的 86 MB 约 26 ms；many 档由 40 万条元数据与写入主导，哈希占比可以忽略。所以 **W1 不是 I/O 到顶，而是「写 + 哈希」串行**：`writer.rs` 的 `emit` 先 `write_all` 再 `hasher.update`，两段都压在同一线程的临界路径上。可行的下一步是把哈希放进独立线程、用小块环形缓冲与写入重叠（顺序不变，SHA-1 仍覆盖每个字节），预期 W1 从 235 ms 降到接近 150 ms；这一项作为 **S14** 单独立项，不在本轮改。
+
+### 34.5 决定
+
+- 两处提示位改动已回退，`git diff` 为空；不引入平台专有代码，也不再增加 I/O 提示位。热缓存下测不出收益，冷缓存未测——保持默认是保守选择，不等于冷缓存也没有收益。
+- **Linux / macOS 路径不做**：`copy_file_range` / `fcopyfile` 只能在两个 fd 之间搬字节，而 zip 的 SHA-1 必须覆盖写出的每一个字节（单趟哈希是本项目的核心收益之一），走内核零拷贝还得再读一遍补齐哈希，省不下来；`fadvise` / `F_NOCACHE` 属提示级，收益与 Windows 同类。本机没有 Linux 环境，CI 的共享 runner 只能做构建与功能验证，给不出可信的「<10% 收益」判定，按「不写无法验证的路径」处理。
+- **§22 的 S6「非临时写」与 §2 的 1 GB 单条目标**：据此降级为待办（descoped），本轮不再追；同一份 I/O 预算优先给 S14 的哈希重叠，因为后者有 34.4 的实测支撑。
+- 需要时仍有 `RPS_TRACE=1` 打印 `scan=<ms>` 与写入前的总耗时，可以判断瓶颈在扫描还是写出。
+
+### 34.6 仍然清楚的边界
+
+- `verify_sources` 打开时，每个直拷条目会**多解压一遍做 CRC 校验**；写出本身仍是压缩字节直拷（`writer.add_raw` 内没有解码器），用于怀疑来源被改动的排障场景，默认关闭。
+- 条目上限 500k（约 175 MB 元数据）；超过会直接报错而不是 OOM。
+- 输出仍是单线程顺序写 + 单趟 SHA-1（S14 之前）；并行 deflate 只在「需要重新压缩的条目」上有意义，当前收益不足以抵消复杂度和体积（见 §17、§18）。
