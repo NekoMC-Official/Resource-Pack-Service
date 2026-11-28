@@ -2,9 +2,8 @@
 
 > 对象：本仓库 `rps-pack`（Rust 合并器，Resource Pack Service 0.1.0 内置）  
 > 基线：同语义 Java 单线程实现（`ZipInputStream` + 内存去重 + `ZipOutputStream` level 6）——RoseResourcepack 一类老牌插件采用的写法  
-
 >
-> **2026-11-28 补注**：本文数字是优化前的基线（当时的实现会把整包解压进内存再重压，`archive.rs` 已在 S2 删除）。当前实现走「扫中央目录 + 原始字节直拷 + 写时单趟 SHA-1」，同夹具 W1 约 140 ms / 12 MB、W2 约 90 ms / 27 MB，见 `docs/rps-pack-maxperf-plan.md` §2–§35。本文保留用于说明「为什么要改」。
+> **2026-11-28 补注**：本文数字是优化前的基线（当时的实现会把整包解压进内存再重压，`archive.rs` 已在 S2 删除）。当前实现走「扫中央目录 + 原始字节直拷 + 写时单趟 SHA-1，S14 起在独立线程与写重叠」，同夹具 W1 约 140 ms / 12 MB、W2 约 90 ms / 27 MB，见 `docs/rps-pack-maxperf-plan.md` §2–§35。本文保留用于说明「为什么要改」。
 
 ---
 

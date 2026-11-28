@@ -195,12 +195,14 @@ community:
 | `delivery.fanout.max-concurrent` | `64` | 同时在途的推送上限（窗口上限），1–1024 |
 | `delivery.fanout.jitter-ms` | `1500` | 进服推送的随机抖动上限，0–10000 |
 | `delivery.fanout.retry` | `1` | 单次推送失败后的重试次数，0–3（间隔 5 秒） |
-| `delivery.fanout.ramp` | `true` | 是否按失败率自动升降窗口（>2% 减半、<1% 每 5 秒 +25%） |
+| `delivery.fanout.ramp` | `true` | 是否按失败率自动升降窗口：每 5 秒检查一次、样本 ≥8 才生效（>2% 减半、<1% +25%）；关闭时直接用上限 |
 | `delivery.http.enabled` | `true` | 是否启动内置 HTTP 出口 |
 | `delivery.http.bind` | `0.0.0.0` | 监听地址 |
 | `delivery.http.port` | `25580` | 监听端口；`0` 表示随机端口（启动日志会打印实际值） |
 | `delivery.http.path` | `/pack/merged.zip` | 固定下载路径 |
 | `delivery.http.public-url` | 空 | 完整公网地址；填了优先使用 |
+| `delivery.http.max-concurrent` | `64` | 同时在途的下载上限，1–4096；占满时新请求直接 503 + `Retry-After: 1` |
+| `delivery.http.egress-kbps` | `0` | 出口全局限速（KB/s），0–10000000；0 表示不限 |
 | `watch.enabled` | `true` | 是否轮询来源文件 |
 | `watch.interval-seconds` | `60` | 轮询间隔，最小 5 |
 | `push.mode` | `notify` | 内容变化后：`none` 只落盘 / `notify` 提示玩家 / `force` 强制重推 |
@@ -209,8 +211,9 @@ community:
 `push.mode` 只影响**内容真的变化**的那一次构建。相同内容重复构建会跳过重推，
 避免玩家白白重下整包。
 
-`delivery.fanout.*` 只作用于进服推送与内容变化后的批量推送：已加载同一 SHA-1 的玩家会被跳过，
-退服立即释放窗口，在途超过 120 秒记为失败；`/rps push <玩家>` 单人推送仍直接发包。
+`delivery.fanout.*` 作用于进服推送、内容变化后的批量推送，以及 `/rps push` 的全体路径（含控制台无参形式）：
+普通推送会跳过已加载同一 SHA-1 的玩家，退服立即释放窗口，在途超过 120 秒记为失败；
+`push.mode: force` 与手动全体推送传空 SHA-1，不跳过已加载玩家。`/rps push <玩家>` 单人推送仍直接发包。
 
 ### `provider.required` 的作用范围
 
@@ -221,7 +224,7 @@ community:
 | --- | --- | --- |
 | `none` | 只落盘，不通知也不重推 | 玩家下次进服仍会推送，`needed` 由 `required` 决定 |
 | `notify` | 给在线玩家发 `push.notify-message`，玩家自己点提示重载 | 同上 |
-| `force` | 立刻对所有在线玩家重推（内容未变也推） | 只表示“立即重推”；不会把包标成必需（推送时客户端的 `required` 恒为 `false`），必需性由服务端在收到 `DECLINED` 后按 `provider.required` 执行 |
+| `force` | 内容变化后排队重推所有在线玩家（已加载同一 SHA-1 的仍跳过；内容未变不触发，见上） | 只表示“立即重推”；不会把包标成必需（推送时客户端的 `required` 恒为 `false`），必需性由服务端在收到 `DECLINED` 后按 `provider.required` 执行 |
 
 `required: false` 时，玩家拒绝后只是记录 `DECLINED`，**下次进服仍会再推一次**（服务端不保存
 “永不再推”的标记）；`required: true` 时拒绝会在玩家实体调度器上按 `provider.reject-message` 断开，

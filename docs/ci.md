@@ -6,7 +6,7 @@
 
 - 触发：推送到 `main`、任意 Pull Request、手动 `workflow_dispatch`。
 - 环境：`ubuntu-latest` + Python 3.12 + Zulu JDK 26 + Rust stable。
-- 步骤：`python -m unittest discover -s tools`（绑定选择与变体规则）→ `cargo test` → `cargo build --release` → `./gradlew build`（一次构建 Paper 与 Fabric 两个模块；`RPS_PACK_BIN` 只给单元测试定位真实二进制，构建脚本不读它）→ 断言两个 jar 里都有 `rps-pack/bin/rps-pack*`（缺失即失败）→ `python tools/check_jar_size.py`（体积守卫：Paper ≤ 2,750,000 B、Fabric ≤ 2,900,000 B，超限 exit 1）→ 上传两个产物：`resource-pack-service-<版本>.jar`（Paper/Folia）与 `resource-pack-service-fabric-<版本>.jar`（Fabric 服务端）。默认版本 `0.1.0`，工作流内可用 `-Pversion=` 覆盖。
+- 步骤：`python -m unittest discover -s tools`（绑定选择与变体规则）→ `cargo test` → `cargo build --release` → `./gradlew build`（一次构建 Paper 与 Fabric 两个模块；`RPS_PACK_BIN` 只给单元测试定位真实二进制，构建脚本不读它）→ `cargo check --target x86_64-pc-windows-msvc`（Windows 目标编译）→ 断言两个 jar 里都有 `rps-pack/bin/rps-pack*`（缺失即失败）→ `python3 tools/check_jar_size.py`（体积守卫：Paper ≤ 2,750,000 B、Fabric ≤ 2,900,000 B，超限 exit 1）→ 上传两个产物：`resource-pack-service-<版本>.jar`（Paper/Folia）与 `resource-pack-service-fabric-<版本>.jar`（Fabric 服务端）。默认版本 `0.1.0`，工作流内可用 `-Pversion=` 覆盖。
 - 构建机是 Linux，所以产物里的内置合并器是 **linux-x86_64**，可直接部署到 Linux 服务端。
 
 ## Release（`release.yml`）
