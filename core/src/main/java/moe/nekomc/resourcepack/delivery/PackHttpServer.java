@@ -16,6 +16,8 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -28,11 +30,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class PackHttpServer implements AutoCloseable {
 
     private static final String THREAD_PREFIX = "rps-http-";
+    private static final int DEFAULT_MAX_CONCURRENT = 64;
+    private static final int TRANSFER_CHUNK = 64 * 1024;
+    private static final long SLOT_WAIT_MILLIS = 100L;
 
     private final Path zipFile;
     private final String bind;
     private final int configuredPort;
     private final String urlPath;
+    private final Semaphore slots;
+    private final TokenBucket egress;
 
     private volatile HttpServer server;
     private volatile ExecutorService executor;
@@ -41,12 +48,23 @@ public final class PackHttpServer implements AutoCloseable {
     private volatile String lastUrl = "";
 
     public PackHttpServer(Path zipFile, String bind, int port, String urlPath) {
+        this(zipFile, bind, port, urlPath, DEFAULT_MAX_CONCURRENT, 0L);
+    }
+
+    /**
+     * @param maxConcurrent 同时在途的下载上限，占满时新请求直接 503
+     * @param egressBytesPerSecond 全局限速（字节/秒），0 表示不限
+     */
+    public PackHttpServer(
+            Path zipFile, String bind, int port, String urlPath, int maxConcurrent, long egressBytesPerSecond) {
         this.zipFile = zipFile;
         this.bind = bind == null || bind.isBlank() ? "0.0.0.0" : bind.trim();
         // 端口合法性留到 start 里检查：那里能把失败统一转成 IOException，由调用方降级而不是让插件半死。
         this.configuredPort = port;
         String path = urlPath == null || urlPath.isBlank() ? "/pack/merged.zip" : urlPath.trim();
         this.urlPath = path.startsWith("/") ? path : "/" + path;
+        this.slots = new Semaphore(Math.max(1, maxConcurrent), true);
+        this.egress = new TokenBucket(egressBytesPerSecond);
     }
 
     /** 绑定端口并开始服务；port 传 0 时由系统分配，实际端口用 {@link #port()} 取。 */
@@ -119,27 +137,94 @@ public final class PackHttpServer implements AutoCloseable {
                 exchange.sendResponseHeaders(304, -1);
                 return;
             }
-            // 用同一个句柄取长度并输出：合成换包时也不会把新文件多写或少写到已经声明的长度之外。
-            try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-                long size = channel.size();
-                exchange.getResponseHeaders().set("Content-Type", "application/zip");
-                if ("HEAD".equals(method)) {
-                    exchange.getResponseHeaders().set("Content-Length", Long.toString(size));
-                    exchange.sendResponseHeaders(200, -1);
-                    return;
-                }
-                exchange.sendResponseHeaders(200, size);
-                try (OutputStream out = exchange.getResponseBody()) {
-                    WritableByteChannel target = Channels.newChannel(out);
-                    long position = 0;
-                    while (position < size) {
-                        long moved = channel.transferTo(position, size - position, target);
-                        if (moved <= 0) {
-                            break;
+            // 并发窗口兜底：拿不到槽位直接 503，让客户端稍后重试，避免线程池与出口带宽一起被拖死。
+            if (!acquireSlot()) {
+                exchange.getResponseHeaders().set("Retry-After", "1");
+                exchange.sendResponseHeaders(503, -1);
+                return;
+            }
+            try {
+                // 用同一个句柄取长度并输出：合成换包时也不会把新文件多写或少写到已经声明的长度之外。
+                try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+                    long size = channel.size();
+                    exchange.getResponseHeaders().set("Content-Type", "application/zip");
+                    if ("HEAD".equals(method)) {
+                        exchange.getResponseHeaders().set("Content-Length", Long.toString(size));
+                        exchange.sendResponseHeaders(200, -1);
+                        return;
+                    }
+                    exchange.sendResponseHeaders(200, size);
+                    try (OutputStream out = exchange.getResponseBody()) {
+                        WritableByteChannel target = Channels.newChannel(out);
+                        long position = 0;
+                        while (position < size) {
+                            long want = Math.min(TRANSFER_CHUNK, size - position);
+                            egress.acquire((int) want);
+                            long moved = channel.transferTo(position, want, target);
+                            if (moved <= 0) {
+                                break;
+                            }
+                            position += moved;
                         }
-                        position += moved;
                     }
                 }
+            } finally {
+                slots.release();
+            }
+        }
+    }
+
+    private boolean acquireSlot() {
+        try {
+            return slots.tryAcquire(SLOT_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /** 全局限速：令牌桶按字节计，0 表示不限；等待按 50 ms 步长让出，关服时能尽快退出。 */
+    private static final class TokenBucket {
+
+        private final double bytesPerSecond;
+        private final double capacity;
+        private double tokens;
+        private long lastNanos = System.nanoTime();
+
+        TokenBucket(long bytesPerSecond) {
+            this.bytesPerSecond = Math.max(0L, bytesPerSecond);
+            this.capacity = Math.max(this.bytesPerSecond, TRANSFER_CHUNK);
+            this.tokens = this.capacity;
+        }
+
+        void acquire(int bytes) {
+            if (bytesPerSecond <= 0 || bytes <= 0) {
+                return;
+            }
+            synchronized (this) {
+                while (true) {
+                    refill();
+                    if (tokens >= bytes) {
+                        tokens -= bytes;
+                        return;
+                    }
+                    long waitMillis = (long) Math.ceil((bytes - tokens) / bytesPerSecond * 1000.0);
+                    try {
+                        Thread.sleep(Math.max(1L, Math.min(waitMillis, 50L)));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }
+        }
+
+        private void refill() {
+            long now = System.nanoTime();
+            double elapsed = (now - lastNanos) / 1_000_000_000.0;
+            lastNanos = now;
+            if (elapsed > 0) {
+                tokens = Math.min(capacity, tokens + elapsed * bytesPerSecond);
             }
         }
     }

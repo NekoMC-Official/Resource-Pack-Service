@@ -1119,3 +1119,25 @@ Rust 52 项（lib 7 + merge 26 + mcmeta 2 + writer 9 + serve 1 + scan 7）。新
 - `many` 档由 40 万条元数据主导，收益在噪声内；S14 只针对大字节量。
 - 多 1 个线程、约 12 MiB 缓冲；micro / small 实测无回归。
 - `RPS_SYNC_HASH` 是排障开关，不是配置项。
+
+## 36. S10b：HTTP 出口并发与限速（2026-11-28）
+
+### 36.1 实现
+
+- `PackHttpServer` 新增 6 参构造（`maxConcurrent`、`egressBytesPerSecond`），原 4 参保留并委托（64 / 不限）。
+- 并发窗口：`Semaphore` 公平锁，`tryAcquire(100 ms)` 失败直接 `503` + `Retry-After: 1`；槽位覆盖整个响应体，`finally` 释放；304/404/405 不占槽。
+- 全局限速：令牌桶按字节计数（容量 = max(速率, 64 KiB)），固定 64 KiB 分片 `transferTo` 前取令牌；等待按 50 ms 步长让出，`InterruptedException` 立即返回。
+- 配置：`delivery.http.max-concurrent`（默认 64，1–4096）、`delivery.http.egress-kbps`（默认 0 = 不限，0–10,000,000）；Paper `startDelivery` 与 Fabric `FabricPlatform` 都从 `RpsConfig` 取值。
+- `force` 语义收口：`PackPublisher` 与 `/rps push` 全体路径改为传空 SHA-1 入队，跳过「已加载同版本」过滤；单人 `/rps push <玩家>` 仍直连。
+
+### 36.2 测试
+
+- `PackHttpServerTest.servesWhenEgressLimitIsEnabled`：限速开启仍能完整下载。
+- `PackHttpServerTest.answers503WhenConcurrentSlotsAreExhausted`：8 MiB 文件 + 单槽 + 慢读客户端占住槽位，第二个请求得到 503 与 `Retry-After: 1`。
+- `FanoutControllerLifecycleTest.unconditionalPushIgnoresLoadedState`：普通推送跳过已加载玩家，空 SHA-1 强制重推。
+
+### 36.3 边界
+
+- 限速是进程级总出口上限，不区分玩家/地址；令牌桶容量固定 64 KiB，短连接可能先拿到一拍突发。
+- 503 只在没有空闲槽位时出现，客户端会按下载失败处理并计入一次重试；调大窗口或降低并发下载数可避免。
+- 槽位等待 100 ms 是硬编码，不随配置变化。

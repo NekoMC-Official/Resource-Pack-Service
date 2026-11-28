@@ -34,6 +34,8 @@ class RpsConfig private constructor(
     private val httpPortNumber: Int,
     private val httpUrlPath: String,
     private val httpPublicUrl: String,
+    private val httpMaxConcurrent: Int,
+    private val httpEgressKbps: Int,
     private val fanoutMaxConcurrent: Int,
     private val fanoutJitterMs: Int,
     private val fanoutRetry: Int,
@@ -112,6 +114,12 @@ class RpsConfig private constructor(
 
     /** 对外下载地址；非空时优先于自动拼装，适用于反代或 CDN。 */
     fun deliveryPublicUrl(): String = httpPublicUrl
+
+    /** HTTP 出口同时在途的下载上限；占满时新请求直接 503。 */
+    fun deliveryHttpMaxConcurrent(): Int = httpMaxConcurrent
+
+    /** HTTP 出口全局限速（KB/s）；0 表示不限。 */
+    fun deliveryHttpEgressKbps(): Int = httpEgressKbps
 
     /** 同时处于下载中的玩家上限（fanout 并发窗口）。 */
     fun deliveryFanoutMaxConcurrent(): Int = fanoutMaxConcurrent
@@ -250,6 +258,8 @@ class RpsConfig private constructor(
                 httpPortNumber = config.getInt("delivery.http.port", 25580).coerceIn(0, 65535),
                 httpUrlPath = config.getString("delivery.http.path", "/pack/merged.zip") ?: "/pack/merged.zip",
                 httpPublicUrl = (config.getString("delivery.http.public-url", "") ?: "").trim(),
+                httpMaxConcurrent = config.getInt("delivery.http.max-concurrent", 64).coerceIn(1, 4096),
+                httpEgressKbps = config.getInt("delivery.http.egress-kbps", 0).coerceIn(0, 10_000_000),
             fanoutMaxConcurrent = config.getInt("delivery.fanout.max-concurrent", 64).coerceIn(1, 1024),
             fanoutJitterMs = config.getInt("delivery.fanout.jitter-ms", 1500).coerceIn(0, 10_000),
             fanoutRetry = config.getInt("delivery.fanout.retry", 1).coerceIn(0, 3),

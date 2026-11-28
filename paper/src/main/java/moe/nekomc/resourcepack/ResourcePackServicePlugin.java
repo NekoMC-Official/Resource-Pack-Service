@@ -219,7 +219,9 @@ public final class ResourcePackServicePlugin extends JavaPlugin implements PackH
                     config.outputDir().resolve("merged.zip"),
                     config.deliveryHttpBind(),
                     config.deliveryHttpPort(),
-                    config.deliveryHttpPath());
+                    config.deliveryHttpPath(),
+                    config.deliveryHttpMaxConcurrent(),
+                    config.deliveryHttpEgressKbps() * 1024L);
             try {
                 candidate.start();
                 server = candidate;

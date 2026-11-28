@@ -187,7 +187,7 @@ class RpsCommand(private val plugin: CommandHost) {
         val controller = publisher?.fanout()
         if (controller != null) {
             val all = plugin.onlinePlayers()
-            controller.enqueue(all.map { it.uniqueId() }, publisher?.snapshot()?.sha1() ?: "", false)
+            controller.enqueue(all.map { it.uniqueId() }, "", false)
             sender.sendMessage(
                 PackMessages.ok("已把 " + all.size + " 名在线玩家排入推送队列" + if (force) "（强制）" else "")
             )

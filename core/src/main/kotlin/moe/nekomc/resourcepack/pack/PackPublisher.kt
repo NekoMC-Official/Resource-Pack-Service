@@ -305,7 +305,7 @@ class PackPublisher(private val plugin: PackHost) {
                 val controller = fanout()
                 if (controller != null) {
                     // force 不看客户端已加载状态，空 sha1 表示无条件重推
-                    controller.enqueue(targets, result.sha1(), false)
+                    controller.enqueue(targets, "", false)
                     plugin.logger().info("按 force 排队重推 " + targets.size + " 名玩家")
                 } else {
                     var pushed = 0

@@ -292,7 +292,9 @@ public final class FabricPlatform implements PackHost, CommandHost {
                     snapshot.outputDir().resolve("merged.zip"),
                     snapshot.deliveryHttpBind(),
                     snapshot.deliveryHttpPort(),
-                    snapshot.deliveryHttpPath());
+                    snapshot.deliveryHttpPath(),
+                    snapshot.deliveryHttpMaxConcurrent(),
+                    snapshot.deliveryHttpEgressKbps() * 1024L);
                 next.start();
             } catch (Exception error) {
                 // 端口越界抛的是 IllegalArgumentException，不只 IOException。

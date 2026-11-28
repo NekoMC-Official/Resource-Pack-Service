@@ -169,6 +169,24 @@ class FanoutControllerLifecycleTest {
         return controller.stats().getWindow();
     }
 
+    @Test
+    void unconditionalPushIgnoresLoadedState() {
+        FanoutController controller = controller(64, 0, 1, false);
+        UUID player = UUID.randomUUID();
+        delivery.loaded.put(player, "sha");
+
+        controller.enqueue(List.of(player), "sha", false, clock.get());
+        scheduler.tick();
+        assertEquals(0, delivery.pushed.size(), "普通推送跳过已加载同一版本的玩家");
+        assertEquals(1L, controller.stats().getDropped());
+
+        controller.enqueue(List.of(player), "", true, clock.get());
+        scheduler.tick();
+        assertEquals(1, delivery.pushed.size(), "空 sha1 表示无条件重推");
+        assertEquals(1, controller.stats().getInflight());
+        controller.close();
+    }
+
     private static final class FakeScheduler implements Scheduler {
         private Runnable ticker;
 

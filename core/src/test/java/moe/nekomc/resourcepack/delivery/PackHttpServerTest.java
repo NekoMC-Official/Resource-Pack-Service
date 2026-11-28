@@ -4,6 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -100,5 +104,51 @@ class PackHttpServerTest {
     void boundPortIsReported() {
         assertTrue(server.port() > 0, "port=0 时应回报实际端口");
         assertTrue(server.running());
+    }
+
+    @Test
+    void servesWhenEgressLimitIsEnabled() throws Exception {
+        Path zip = tempDir.resolve("limited.zip");
+        Files.write(zip, BODY);
+        PackHttpServer limited = new PackHttpServer(zip, "127.0.0.1", 0, "/pack/merged.zip", 4, 4096L * 1024);
+        limited.start();
+        try {
+            HttpResponse<byte[]> response = client.send(HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:" + limited.port() + "/pack/merged.zip")).GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            assertEquals(200, response.statusCode());
+            assertArrayEquals(BODY, response.body());
+        } finally {
+            limited.close();
+        }
+    }
+
+    @Test
+    void answers503WhenConcurrentSlotsAreExhausted() throws Exception {
+        Path big = tempDir.resolve("big.zip");
+        byte[] payload = new byte[8 * 1024 * 1024];
+        new java.util.Random(7).nextBytes(payload);
+        Files.write(big, payload);
+        PackHttpServer limited = new PackHttpServer(big, "127.0.0.1", 0, "/pack/merged.zip", 1, 0L);
+        limited.start();
+        try (Socket first = new Socket()) {
+            first.setReceiveBufferSize(16 * 1024);
+            first.connect(new InetSocketAddress("127.0.0.1", limited.port()), 5000);
+            OutputStream request = first.getOutputStream();
+            request.write(("GET /pack/merged.zip HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .getBytes(StandardCharsets.US_ASCII));
+            request.flush();
+            InputStream response = first.getInputStream();
+            // 只读一点点就不再消费：服务端会被发送缓冲挡住，正好把唯一的槽位占住。
+            response.read(new byte[1024]);
+            Thread.sleep(200);
+            HttpResponse<byte[]> rejected = client.send(HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:" + limited.port() + "/pack/merged.zip")).GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            assertEquals(503, rejected.statusCode());
+            assertEquals("1", rejected.headers().firstValue("Retry-After").orElse(""));
+        } finally {
+            limited.close();
+        }
     }
 }
