@@ -9,7 +9,7 @@
 
 [![Minecraft](https://img.shields.io/badge/Minecraft-26.3-62b47a)](https://www.minecraft.net/)
 [![Paper / Folia](https://img.shields.io/badge/Paper%20%7C%20Folia-26.3-4caf50)](https://papermc.io/software/folia)
-[![Fabric](https://img.shields.io/badge/Fabric-0.20.1%2B-dbd0b4)](https://fabricmc.net/)
+[![Fabric](https://img.shields.io/badge/Fabric-26.3-dbd0b4)](https://fabricmc.net/)
 [![Java](https://img.shields.io/badge/Java-25-orange)](https://adoptium.net/)
 [![Rust](https://img.shields.io/badge/Rust-2024-b7410e)](https://www.rust-lang.org/)
 
