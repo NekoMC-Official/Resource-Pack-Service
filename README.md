@@ -192,6 +192,10 @@ community:
 | `community.remote.pin-sha1` | 空 | 固定索引内容的 SHA-1 / SHA-256，防止索引被替换 |
 | `delivery.join-delay-ticks` | `1` | 进服后延迟多少 tick 推送 |
 | `delivery.status-feedback` | `true` | 是否把加载/拒绝结果回显给玩家 |
+| `delivery.fanout.max-concurrent` | `64` | 同时在途的推送上限（窗口上限），1–1024 |
+| `delivery.fanout.jitter-ms` | `1500` | 进服推送的随机抖动上限，0–10000 |
+| `delivery.fanout.retry` | `1` | 单次推送失败后的重试次数，0–3（间隔 5 秒） |
+| `delivery.fanout.ramp` | `true` | 是否按失败率自动升降窗口（>2% 减半、<1% 每 5 秒 +25%） |
 | `delivery.http.enabled` | `true` | 是否启动内置 HTTP 出口 |
 | `delivery.http.bind` | `0.0.0.0` | 监听地址 |
 | `delivery.http.port` | `25580` | 监听端口；`0` 表示随机端口（启动日志会打印实际值） |
@@ -204,6 +208,9 @@ community:
 
 `push.mode` 只影响**内容真的变化**的那一次构建。相同内容重复构建会跳过重推，
 避免玩家白白重下整包。
+
+`delivery.fanout.*` 只作用于进服推送与内容变化后的批量推送：已加载同一 SHA-1 的玩家会被跳过，
+退服立即释放窗口，在途超过 120 秒记为失败；`/rps push <玩家>` 单人推送仍直接发包。
 
 ### `provider.required` 的作用范围
 

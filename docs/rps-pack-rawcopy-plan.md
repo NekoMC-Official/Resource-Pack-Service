@@ -1,7 +1,9 @@
 # rps-pack 原始字节搬运重构（P0）实施计划
 
 > 状态：计划待批（2026-11-27）｜分支 `feat/fabric-server-mod`｜本文件只描述做法，不含实现代码改动。
-> 依据：`docs/optimization-research.md` 的原型实测（两阶段拷贝：W1 21–31×、RSS 36×）与 `docs/perf-benchmark.md` 的横向数据。
+
+>
+> **2026-11-28 补注**：本计划已按 S0–S7 实施完毕（提交 `3c8772a` 起），实测与后续切片见 `docs/rps-pack-maxperf-plan.md` §23–§35；文中「预期」数字保留作对照。
 
 ---
 

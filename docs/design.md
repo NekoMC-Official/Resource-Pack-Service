@@ -264,7 +264,9 @@ registry.ordered()
   取 `true` 时 `PackPusher` 把 `needed=true` 传给 `setResourcePack`，客户端即使档位为「已禁用」
   也会弹必装框（Proceed / Disconnect），拒绝时客户端会先用自己的文案断开、`reject-message` 只作兜底；
   取 `false` 时客户端一律当可选包，客户端弹窗文案始终是“建议/可选”；
-- 内容变化后：`none` 不动作，`notify` 发可点击提示，`force` 直接重推所有在线玩家。
+- 内容变化后：`none` 不动作，`notify` 发可点击提示，`force` 直接重推所有在线玩家；
+  批量推送统一进 `FanoutController` 的队列（进服与广播两条，按就绪时间取，单 tick ≤200），
+  已在途或已加载同一 SHA-1 的玩家跳过，窗口从 8 起按失败率升降，上限 `delivery.fanout.max-concurrent`。
 
 客户端只保留最后收到的包；同一时刻只允许本插件推送，是部署前提。
 
