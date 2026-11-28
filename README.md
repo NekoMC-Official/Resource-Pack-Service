@@ -101,6 +101,9 @@ Minecraft 只接受一个服务端资源包。多个插件各发各的时，客�
 两个版本共用同一套配置键（`provider` / `merge` / `delivery` / `sources` / `watch` / `push` / `community`），
 文档里的配置示例两边通用。
 
+> Release 附件按构建平台命名，当前自动发行只产出 `linux-x86_64`（内置 Linux 合并器）。
+> Windows / macOS 服务端请按[从源码构建](#从源码构建)在目标平台打包。
+
 ### Paper / Folia
 
 1. 把 `resource-pack-service-<版本>.jar` 放进服务端 `plugins/`（文件名不影响加载，带版本号便于核对）。
@@ -528,7 +531,8 @@ packs/
 
 `rps-pack` 按构建机平台选一份塞进 jar（Windows / Linux / macOS × x86_64 / aarch64）。
 **在 Windows 上打的包内置的是 Windows 合并器，不能直接部署到 Linux 服务端**；
-跨平台发布请用 `release.yml` 的矩阵构建，或在目标平台本地构建。
+跨平台发布请在目标平台本地构建，或手动触发 `release.yml` 的 linux / windows 矩阵
+（Auto Release 创建的 tag 不会自动触发它）。
 
 没有 `cargo` 时 Java 部分仍能编译，但 jar 内没有合并器，运行时会报「合并器不可用」
 并保留上一版；发布用的 jar 必须在有 Rust 的机器上打。
