@@ -13,7 +13,7 @@
 | --- | --- |
 | 超大资源包（GB 级字节量） | 比「Java 单线程重打包」快 **1.20×**，产物小 0.005%；但峰值内存高 18%（547 MB / 270 MB 输入）。**压缩核（zlib-rs）单核比 JVM Deflater 快 15–30%**，这是快的主因。 |
 | 超多资源包（几十个来源、上万条目） | 与 Java 单线程 **打平**（973 ms vs 924 ms，墙钟 ≈1.00×），但 **峰值内存低 3.9–6.6×**（100 MB vs 390 MB），因为 Rust 端没有每条目双份拷贝。 |
-| 对 ResourcePackManager（4 线程并行写入器） | **不占优**。按其 4 worker 设计做同输入微基准，压缩阶段可提速 **3.42–3.44×**；据此估算它在 W1 约 1.5–1.9 s、W2 约 0.45–0.6 s，快于我们。这是必须补的短板。 |
+| 对 ResourcePackManager（4 线程并行写入器） | **实测远快于它**（§9，RPM 2.4.14 完整管线）：W1 147 ms vs 3.0 s（**20.6×**）、W2 108 ms vs 15.1 s（**141×**）、19.6k 条目 67 ms vs 25.3 s（**380×**）、高重叠 5,063 条 127 ms vs 18.8 s（**149×**）；峰值内存只有它的 1/11–1/25。旧「估算 1.5–1.9 s / 0.45–0.6 s」是只测压缩核的外推，作废。 |
 | 对 ResourcepacksPlugins | **不构成竞争**：它不合并、不打包，只按代理/世界下发 URL，合并成本为 0，但前提是你已经有一个合并好的包。 |
 | 对 RoseResourcepack | 我们快 1.20×，且自动侦测重建 + HTTP ETag/304 + 逐玩家回执；它是手动 `/roserp zip` + 单线程 `ZipOutputStream`，代码中未见 ETag。 |
 
@@ -92,8 +92,10 @@
 
 ResourcePackManager 的 `ParallelZipWriter` 正是 4 worker + 8 MB 单条目内存阈值 + 背压队列（`MAX_PENDING_ENTRIES = 8`），因此：
 
-- **估算**（非实测）：W1 约 1.5–1.9 s，W2 约 0.45–0.6 s；
-- 我们当前的单线程实现在多核机器上会输给它 2–3×。
+- 这只说明它有并行压缩的潜力；完整管线还要把每个来源解压到暂存目录、逐条重压，成本远高于压缩核本身。
+- 一对一实测见 §9：RPM 完整管线 W1 3.0 s、W2 15.1 s，本仓为 147 ms / 108 ms；「会输 2–3×」的旧结论作废。
+
+> 2026-11-28 补：以上是只测压缩核的外推。RPM 完整管线的一对一实测见 §9（W1 3.0 s、W2 15.1 s），比估算慢一个数量级——暂存落盘与 JSON 合并都没有计入。
 
 ---
 
@@ -163,6 +165,10 @@ W2 只有 84.7 MB，却要处理 5,063 个条目、40 个 zip 中央目录、182
 ```
 
 ```bash
+# 与 ResourcePackManager 的一对一对照（先看 tools/bench/rpm/README.md）
+# powershell -File tools/bench/rpm/build.ps1
+# RPS_PACK_BIN=rust/rps-pack/target/release/rps-pack.exe python tools/bench/rpm/bench.py --rounds 3
+
 # 我们的合并器
 rust/rps-pack/target/release/rps-pack.exe merge \
   --request .tmp/bench/request-large.json --output .tmp/bench/merged-large-rust.zip
@@ -181,11 +187,62 @@ rust/rps-pack/target/release/rps-pack.exe merge \
 ## 8. 口径与局限
 
 1. Java 基线是**按 RoseRP 写法重写的同语义实现**，不是 RoseRP 原码（原码还带 Bukkit 依赖，无法独立跑）；因此 1.20× 反映「同类实现」的差距，不是对 RoseRP 二进制的一对一测量。
-2. ResourcePackManager **未实测**（其 `ParallelZipWriter` 依赖整套 Gradle 模块与 MC 依赖）；文中 1.5–1.9 s / 0.45–0.6 s 是由同输入 4 线程 deflate 微基准外推的估算，已在表中标注。
+2. ResourcePackManager 已在 2026-11-28 做一对一实测（§9）：用它的 MixEngine 完整管线，跳过需要 MC 平台的 Bukkit 部分，仅以 RpmHarness 驱动。§3.3 的 1.5–1.9 s / 0.45–0.6 s 是只测压缩核的外推，已被 §9 作废；§0 与 §3.3 的对应结论已改写。
 3. 输入用随机字节模拟「已压缩的 PNG/OGG」，对 deflate 是最坏情况；纯 JSON 包（可压 4–10×）的绝对耗时会更低，但相对关系不变。
 4. 所有数据来自同一台机器、暖文件缓存；跨机器绝对值会有 ±20% 波动。
 5. 竞品 commit：RoseResourcepack / ResourcepacksPlugins / ResourcePackManager 均为 2026-11-27 clone 的默认分支 HEAD（`git log -1` 见 `.tmp/rose`、`.tmp/rpp`、`.tmp/rpm`）。
 
 ---
 
-*报告生成：2026-11-27；数据与脚本：`.tmp/bench/`（gitignored）*
+## 9. 与 ResourcePackManager 的一对一实测（2026-11-28）
+
+### 9.1 方法与夹具
+
+| 项 | 值 |
+| --- | --- |
+| 对照对象 | ResourcePackManager 2.4.14，commit 1aa7718，MixEngine 完整管线：逐包解压到暂存目录 → Gson 深度合并 JSON → ParallelZipWriter（4 worker）重压 → SHA-1 |
+| 驱动 | tools/bench/rpm/：RpmHarness.java（只调 MixEngine，SILENT 日志）、build.ps1（编译 + 取 gson）、bench.py（两臂分段采样：先直拷 3 轮，再 RPM 3 轮） |
+| 机器 | Ryzen 7 9700X / Windows 11 / Zulu 25 -Xmx4G / rps-pack release（LTO + strip） |
+| 夹具 | w1 / w2 由 tools/bench/gen_tiers.py 生成，many20k 由 gen_many20k.py 生成，s7 由 gen_overlap.py 生成（40 源、45% 名字重叠、182 条冲突）；三份生成器都在仓内，固定种子与 zip 时间戳 |
+| 取样 | 每档 3 轮取中位；峰值工作集 3 ms 采样 |
+| 顺序 | 两臂分段：先连跑 3 轮直拷，再连跑 3 轮 RPM。交替跑会被 RPM 留下的数百 MB 脏页污染——W1 直拷从 147 ms 涨到 281 ms，那是测量误差而不是真实差距。跨档仍残留少量污染（下一档直拷首轮偏慢），取中位吸收 |
+| 可比性 | RPM 用 ZipOutputStream 重压，rps 直拷原始 deflate 字节，产物大小与 sha1 不同；本表只比耗时与内存，不比字节 |
+| 平台 | 仅 Windows（峰值采样走 psapi，classpath 用分号分隔） |
+
+### 9.2 结果
+
+| 档 | 来源 | 条目 | 链式下载字节 | RPM 墙钟（中位） | rps 墙钟（中位） | 倍数 | RPM 峰值 | rps 峰值 | RPM 产物 | rps 产物 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| w1 | 3 | 469 | 270,166,692 | 3,018 ms | **147 ms** | **20.6×** | 139 MB | **12.6 MB** | 270,182,276 B | 270,166,333 B |
+| w2 | 40 | 12,161 | 86,150,367 | 15,147 ms | **108 ms** | **141×** | 386 MB | **26.8 MB** | 86,556,897 B | 86,143,428 B |
+| many20k | 4 | 19,601 | 3,642,408 | 25,292 ms | **67 ms** | **380×** | 384 MB | **15.5 MB** | 4,308,294 B | 3,641,861 B |
+| s7 | 40 | 5,063 | 86,484,750 | 18,790 ms | **127 ms** | **149×** | 375 MB | **25.6 MB** | 44,255,247 B | 44,053,665 B |
+
+倍数按未取整的中位相除（例如 s7 = 18,790.1 / 126.5 = 148.5），用表内取整后的数字复算会有 1 以内的偏差。
+
+逐轮范围（墙钟）：w1 RPM 2,981–3,786 / rps 143–160；w2 15,087–15,420 / 97–156；many20k 23,565–26,760 / 64–90；s7 16,095–20,956 / 126–271。RPM 的方差主要来自 JVM 预热与 Gson 合并，rps 的离群值是系统后台负载。
+
+### 9.3 客户端链式字节 vs 合并包
+
+| 档 | 链式（来源数） | 合并包 | 差 |
+| --- | --- | --- | --- |
+| w1 | 270,166,692 B（3 次请求） | 270,166,333 B | −359 B（0.0001%） |
+| w2 | 86,150,367 B（40 次请求） | 86,143,428 B | −6,939 B（0.008%） |
+| s7 | 86,484,750 B（40 次请求） | 44,053,665 B | **−49.1%** |
+| many20k | 3,642,408 B（4 次请求） | 3,641,861 B | −547 B |
+
+合并真正省的是**请求数**与**跨包重名**。新夹具（w2 / many20k）几乎不重名，字节只有千分之几的差；s7 那类「同一批模型/材质被多个插件分别打包」的场景才省一半。
+
+### 9.4 为什么差距比旧报告大
+
+1. RPM 把每个来源整包解压进暂存目录（w2 约 12,000 个文件、many20k 约 19,600 个），再逐条重压；rps 扫中央目录后直拷原始 deflate 字节，单趟 SHA-1 自 S14 起在独立线程与写出重叠。
+2. RPM 的写入器只有 4 个 worker，而且 JSON 冲突要走 Gson 深度合并；many20k 产物才 4.3 MB，25 秒里大部分是逐条小文件落盘与合并。
+3. 旧报告 §3.3 的 1.5–1.9 s / 0.45–0.6 s 是「只测压缩核 4 线程」的外推，没有计入暂存落盘与 JSON 合并，因此比实测低一个数量级。
+
+### 9.5 结论
+
+> 本机单进程、暖缓存下，rps-pack 比 ResourcePackManager 2.4.14 的完整管线快 **20.6×（W1）、141×（W2）、380×（many20k）、149×（s7）**，峰值内存只有它的 1/11–1/25。线上还要叠加 HTTP 出口与客户端下载，端到端的倍数会被摊薄，但这已经能说明「合并这步不是瓶颈」。
+
+---
+
+*报告生成：2026-11-27；2026-11-28 补 §9（竞品一对一实测）并作废 §3.3 的外推估算；脚本：tools/bench/rpm/ 与 tools/bench/gen_tiers.py*
